@@ -114,6 +114,7 @@ async function auditRobots() {
   const blocksAll = (agent) => (groups.get(agent.toLowerCase()) || []).some((l) => /^Disallow:\s*\/\s*$/i.test(l));
   if (blocksAll('*')) add('critical', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt blocks all crawlers (User-agent: * / Disallow: /)', 'robots/intro');
   for (const b of AI_BOTS) { if (blocksAll(b)) add('medium', 'ai-search', 'handoff', '/robots.txt', `${b} is fully disallowed — that engine cannot cite this site`, 'robots/intro'); }
+  if (Buffer.byteLength(body, 'utf8') > 500 * 1024) add('medium', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt exceeds 500 KiB — Google ignores content past the cap', 'robots/intro');
   const sitemaps = [...body.matchAll(/^\s*Sitemap:\s*(\S+)/gim)].map((m) => m[1]);
   if (!sitemaps.length) add('medium', 'sitemap', 'auto-fix', '/robots.txt', 'no Sitemap: directive in robots.txt', 'sitemaps/build-sitemap');
   const disallows = [...body.matchAll(/^\s*Disallow:\s*(\S+)/gim)].map((m) => m[1]).filter((p) => p && p !== '/');
@@ -300,6 +301,21 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     if (/\bunavailable_after\b/.test(rb)) add('low', 'indexing', 'handoff', path, 'unavailable_after set — page will drop out of the index on that date', 'crawling-indexing/robots-meta-tag');
     if (/\bnosnippet\b/.test(rb) && /\bmax-snippet\b/.test(rb)) add('low', 'indexing', 'auto-fix', path, 'both nosnippet and max-snippet present — the most restrictive wins; drop one', 'crawling-indexing/robots-meta-tag');
     if (/<meta[^>]*name=["']keywords["']/i.test(html)) add('low', 'on-page', 'auto-fix', path, 'meta keywords present — Google does not use it', 'crawling-indexing/special-tags');
+
+    // "Google no longer uses [rel=next/prev]" for pagination.
+    if (/<link[^>]*rel=["'](next|prev)["']/i.test(html)) add('low', 'crawling', 'auto-fix', path, 'rel=next/prev present — Google no longer uses these for pagination', 'specialty/ecommerce/pagination-and-incremental-page-loading');
+
+    // "Don't use the first page of a paginated sequence as the canonical page. Instead, give each
+    // page its own canonical URL." Only assert when this URL IS a paginated page.
+    const u = new URL(url);
+    const pageParam = [...u.searchParams.keys()].find((k) => /^(page|p)$/i.test(k));
+    if (pageParam && Number(u.searchParams.get(pageParam)) > 1 && canonical) {
+      const c = new URL(canonical, origin);
+      if (!c.searchParams.has(pageParam)) add('high', 'canonical', 'auto-fix', path, `paginated page canonicalizes to page 1 (${canonical}) — "give each page its own canonical URL"`, 'specialty/ecommerce/pagination-and-incremental-page-loading');
+    }
+
+    // AMP pairing: the canonical page must point at its AMP page and vice-versa.
+    out.amphtml = linkHref(html, 'amphtml');
   }
   return out;
 }
@@ -380,6 +396,19 @@ for (const u of pages) {
 for (const [target, srcs] of canonicalTargets) {
   const others = srcs.filter((p) => norm(origin + p) !== target);
   if (others.length >= 3) add('critical', 'canonical', 'auto-fix', target, `${others.length} distinct pages declare canonical -> ${target}. rel=canonical is "A strong signal"; this de-indexes them into one page.`, 'consolidate-duplicate-urls');
+}
+
+// AMP pairing: "Google Search requires that an AMP page links to a canonical page." Fetch each
+// declared AMP page and confirm its rel=canonical points back. Only runs when AMP is in use.
+for (const [u, v] of rawViews) {
+  if (!v.amphtml) continue;
+  const amp = new URL(v.amphtml, origin).href;
+  const r = await get(amp);
+  const p = new URL(u).pathname;
+  if (r.status !== 200) { add('high', 'amp', 'auto-fix', p, `rel=amphtml points at ${amp}, which returns ${r.status}`, 'crawling-indexing/amp/validate-amp'); continue; }
+  const back = linkHref(decomment(r.body), 'canonical');
+  if (!back) add('high', 'amp', 'auto-fix', amp, 'AMP page has no rel=canonical back to the HTML page', 'crawling-indexing/amp/enhance-amp');
+  else if (norm(back) !== norm(u)) add('high', 'amp', 'auto-fix', amp, `AMP page canonicalizes to ${back}, not to its HTML page ${u}`, 'crawling-indexing/amp/validate-amp');
 }
 
 // cross-page: hreflang reciprocity. "If two pages don't both point to each other, the tags will be
