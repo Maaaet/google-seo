@@ -205,6 +205,7 @@ const ROUTES = {
 <url><loc>{B}/hl-a</loc></url>
 <url><loc>{B}/hl-b</loc></url>
 <url><loc>{B}/gptbot-only</loc></url>
+<url><loc>{B}/no-viewport</loc></url>
 <url><loc>{B}/amp-canonical?b=1&amp;c=2</loc></url>
 </urlset>`],
   '/ok': ['text/html', page('Unique OK page', '<meta name="description" content="A page that is fine and it&#39;s quoted properly here.">')],
@@ -250,6 +251,8 @@ const ROUTES = {
   '/hl-a': ['text/html', page('Hreflang page a', '<meta name="description" content="Points at page b but b never points back."><link rel="alternate" hreflang="en" href="{B}/hl-a"><link rel="alternate" hreflang="fr" href="{B}/hl-b">')],
   '/hl-b': ['text/html', page('Hreflang page b', '<meta name="description" content="Lists only itself, never points back at a."><link rel="alternate" hreflang="fr" href="{B}/hl-b">')],
   '/gptbot-only': ['text/html', page('GPTBot only page', '<meta name="description" content="Exists so the robots fixture has a page.">')],
+  // NO viewport meta at all -> the missing-viewport finding must fire (positive polarity for emission)
+  '/no-viewport': ['text/html', '<!doctype html><html lang=en><head><title>No viewport page</title><meta name="description" content="This page has no viewport meta tag at all."></head><body><h1>H</h1></body></html>'],
   '/bad-entity': ['text/html', page('Bad&#1114112;Entity Title', '<meta name="description" content="Title carries an out of range character reference.">')],
   // a spec-correct page: both the sitemap <loc> and the canonical escape & as &amp;
   '/amp-canonical': ['text/html', page('Ampersand canonical page', '<meta name="description" content="Canonical and loc both escape the ampersand."><link rel="canonical" href="{B}/amp-canonical?b=1&amp;c=2">')],
@@ -332,6 +335,23 @@ const spaFindings = JSON.parse(readFileSync(OUT2, 'utf8')).findings;
 unlinkSync(OUT2);
 t('[e2e] a catch-all 200 site IS reported as a soft 404', spaFindings.some((f) => /soft 404/i.test(f.message)));
 
+// A site that FULLY disallows GPTBot (Disallow: /) must raise the AI-search handoff. The main
+// fixture only PATH-blocks it, so this positive polarity needs its own site. (The old assertion had
+// an `|| !findings.some(/GPTBot/)` escape clause that made it pass unconditionally -- vacuous.)
+const gptFull = createServer((req, res) => {
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('User-agent: *\nAllow: /\n\nUser-agent: GPTBot\nDisallow: /\n'); }
+  res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('Only page', '<meta name="description" content="A single page behind a GPTBot full block.">'));
+});
+await new Promise((r) => gptFull.listen(0, '127.0.0.1', r));
+const GF = `http://127.0.0.1:${gptFull.address().port}`;
+const OUT3 = path.join(HERE, '.test-findings3.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), GF, '--json', OUT3, '--quiet', '--max-pages', '1'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+gptFull.close();
+const gfFindings = JSON.parse(readFileSync(OUT3, 'utf8')).findings;
+unlinkSync(OUT3);
+t('[e2e] a full GPTBot disallow raises the AI-search handoff', gfFindings.some((f) => /GPTBot is fully disallowed/.test(f.message) && f.class === 'handoff'));
+
 // --render when EVERY sitemap URL redirects: must not spawn Chrome, must not hang, must say so.
 const allRedir = createServer((req, res) => {
   const b = `http://127.0.0.1:${allRedir.address().port}`;
@@ -363,6 +383,7 @@ t('[e2e] a redirected sitemap URL is reported as stale', onPage('/stale-redirect
 t('[e2e] a redirected URL is not also scored as a page (no false canonical)', !onPage('/stale-redirect', /canonical/));
 t('[e2e] a redirected URL does not become a duplicate-title victim', !findings.some((f) => /share one <title>/.test(f.message) && /stale-redirect/.test(f.message)));
 t('[e2e] unquoted name=viewport is not reported missing', !onPage('/minified-viewport', /missing viewport/));
+t('[e2e] a page with NO viewport meta IS reported missing', onPage('/no-viewport', /missing viewport/));
 // detectors the reviewer found untested. Positive polarity for each.
 t('[e2e] aggregateRating without a review count fires', onPage('/agg-bad', /aggregateRating without reviewCount/));
 t('[e2e] aggregateRating always raises a verify-it-is-real handoff', findings.some((f) => /aggregateRating present/.test(f.message) && f.class === 'handoff'));
@@ -370,7 +391,6 @@ t('[e2e] malformed JSON-LD fires the parse finding', onPage('/bad-jsonld', /JSON
 t('[e2e] non-reciprocal hreflang fires', onPage('/hl-a', /not reciprocal/));
 // a per-agent AI-bot block must NOT raise "Google can't render your page"
 t('[e2e] a GPTBot-only asset block does not fire the render-resources CRITICAL', !findings.some((f) => /blocking render resources/.test(f.message)));
-t('[e2e] GPTBot disallow IS reported as an AI-search handoff', findings.some((f) => /GPTBot is fully disallowed/.test(f.message)) || !findings.some((f) => /GPTBot/.test(f.message)));
 t('[e2e] a reciprocal hreflang chain does NOT fire reciprocity', !findings.some((f) => /not reciprocal/.test(f.message) && /chain-/.test(String(f.where))));
 t('[e2e] <img> strings inside JSON-LD are not counted as images', !onPage('/jsonld-img', /without alt/));
 t('[e2e] valid JSON-LD is not falsely reported unparseable', !onPage('/jsonld-img', /does not parse/));
