@@ -58,7 +58,16 @@ const UA = 'Mozilla/5.0 (compatible; google-seo-audit/1.0; +https://github.com/c
 // ---- findings ---------------------------------------------------------------------------------
 const findings = [];
 /** @param sev critical|high|medium|low  @param cls auto-fix|render|handoff */
-const add = (sev, area, cls, where, msg, doc) => findings.push({ severity: sev, area, class: cls, where, message: msg, doc });
+// The same defect reached through two parents (a diamond in the sitemap graph, a shared template) is
+// ONE defect. Dedupe on (severity, where, message) — `where` is in the key, so two pages with the
+// same problem still report twice, which is correct.
+const seenFinding = new Set();
+const add = (sev, area, cls, where, msg, doc) => {
+  const k = `${sev}\u0000${where}\u0000${msg}`;
+  if (seenFinding.has(k)) return;
+  seenFinding.add(k);
+  findings.push({ severity: sev, area, class: cls, where, message: msg, doc });
+};
 
 const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 // SAME SITE means same HOST. `origin` includes the scheme, so a sitemap listing http:// locs while
@@ -368,21 +377,29 @@ async function auditSitemapBody(url, body, headers, depth, ancestors) {
     if (sitemapsFetched >= MAX_SITEMAPS) { add('low', 'sitemap', 'handoff', url, `child-sitemap budget (${MAX_SITEMAPS}) exhausted; the remaining children of this index were NOT fetched (--max-sitemaps to raise)`, 'sitemaps/large-sitemaps'); break; }
     if (ancestors.has(child)) { add('high', 'sitemap', 'auto-fix', child, 'sitemap index cycle: this sitemap is reachable from itself. Google would fetch it once; the loop wastes crawl budget', 'sitemaps/large-sitemaps'); continue; }
     if (fetchedSitemaps.has(child)) continue;   // a diamond, not a loop: its pages were audited via the other parent
-    fetchedSitemaps.add(child); sitemapsFetched++;
+    sitemapsFetched++;
     const r = await get(child);
-    if (r.status !== 200) { add(isTransient(r.status) ? 'medium' : 'high', 'sitemap', isTransient(r.status) ? 'handoff' : 'auto-fix', child, isTransient(r.status) ? `child sitemap temporarily ${r.status} (transient; re-run slower)` : `child sitemap not 200 (got ${r.status})`, 'sitemaps/large-sitemaps'); continue; }
+    if (r.status !== 200) {
+      fetchedSitemaps.add(child);   // broken: don't refetch it through another parent
+      add(isTransient(r.status) ? 'medium' : 'high', 'sitemap', isTransient(r.status) ? 'handoff' : 'auto-fix', child, isTransient(r.status) ? `child sitemap temporarily ${r.status} (transient; re-run slower)` : `child sitemap not 200 (got ${r.status})`, 'sitemaps/large-sitemaps');
+      continue;
+    }
 
     if (/<sitemapindex/i.test(r.body)) {
       // Google's page does not itself forbid nesting; it defers the format: the XML "is defined by
       // the Sitemap Protocol". The protocol has no nested-index form. Say that, don't invent a quote.
       add('high', 'sitemap', 'auto-fix', child, 'a sitemap index lists another sitemap index. Google defers the index format to the Sitemap Protocol ("it\'s defined by the Sitemap Protocol"), which has no nested-index form — point the index at urlset sitemaps', 'sitemaps/large-sitemaps');
-      if (depth + 1 >= MAX_SITEMAP_DEPTH) { add('low', 'sitemap', 'handoff', child, `nested sitemap indexes deeper than ${MAX_SITEMAP_DEPTH} levels were not followed — the pages below this point were NOT audited`, 'sitemaps/large-sitemaps'); continue; }
+      // Deliberately NOT marked fetched: we declined to descend. The same index may also hang off a
+      // shallower parent, and skipping it there would silently drop every page beneath it.
+      if (depth + 1 >= MAX_SITEMAP_DEPTH) { add('low', 'sitemap', 'handoff', child, `nested sitemap indexes deeper than ${MAX_SITEMAP_DEPTH} levels were not followed — the pages below this point were NOT audited unless another, shallower sitemap also lists them`, 'sitemaps/large-sitemaps'); continue; }
+      fetchedSitemaps.add(child);
       // Follow it anyway. Never treat the grandchild sitemap URLs as pages -- they'd be fetched and
       // scored as HTML ("missing <title>" on an .xml file) while the real pages go unaudited.
       for (const l of await auditSitemapBody(child, r.body, r.headers, depth + 1, new Set([...ancestors, child]))) all.push(l);
       continue;
     }
 
+    fetchedSitemaps.add(child);
     const locs = auditOneSitemap(child, r.body, r.headers, { isIndex: false });
     validateLocs(locs, child);
     for (const l of locs) all.push(l);   // NOT all.push(...locs) -- spreading 40k args overflows the stack
@@ -397,7 +414,11 @@ async function auditSitemapBody(url, body, headers, depth, ancestors) {
 async function auditSitemap(smUrls) {
   // Dedup: two identical `Sitemap:` lines would otherwise fetch the same file twice and emit every
   // sitemap-level finding twice.
-  const list = [...new Set(smUrls.length ? smUrls : [origin + '/sitemap.xml'])];
+  const found = [...new Set(smUrls.length ? smUrls : [origin + '/sitemap.xml'])];
+  // MAX_SITEMAPS bounded children WITHIN an index but not the number of `Sitemap:` directives, so a
+  // robots.txt listing thousands of them fetched every one. Cap it, and say what was skipped.
+  const list = found.slice(0, MAX_SITEMAPS);
+  if (found.length > list.length) add('low', 'sitemap', 'handoff', origin + '/robots.txt', `robots.txt lists ${found.length} Sitemap: directives; audited the first ${list.length} (--max-sitemaps to raise). The rest were not fetched.`, 'sitemaps/large-sitemaps');
   const all = [];
   for (const sm of list) { const r = await auditSitemapTree(sm); for (const u of r) all.push(u); }
   return [...new Set(all)];
@@ -619,7 +640,7 @@ async function cdpHtml(wsUrl) {
 
 // ---- site-level probes --------------------------------------------------------------------------
 const GHOST = origin + '/__google-seo-audit-probe-404__';
-let ghostIs200 = false;
+let ghostIs200 = false, ghostFinal = '';
 
 async function siteProbes() {
   if (new URL(base).protocol !== 'https:') add('high', 'page-experience', 'auto-fix', origin, 'site is not served over HTTPS', 'appearance/page-experience');
@@ -627,6 +648,7 @@ async function siteProbes() {
   // Soft 404: a URL that cannot exist must not answer 200.
   const r = await get(GHOST);
   ghostIs200 = r.status === 200;
+  ghostFinal = r.finalUrl && norm(r.finalUrl) !== norm(GHOST) ? r.finalUrl : '';
   if (!ghostIs200) return;
   if (/\bnoindex\b/i.test(metaC(clean(r.body), 'name', 'robots'))) return; // already handled in source
 
@@ -634,15 +656,21 @@ async function siteProbes() {
   // noindex, which raw HTML can't show. Don't call that broken; say what still needs proving.
   if (RENDER) return;  // the render pass below decides
   add('medium', 'crawling', 'handoff', GHOST,
-    'a nonexistent URL returns HTTP 200 (soft 404). If this is a client-routed SPA, confirm the error page adds noindex via JS — "Add a <meta name=\'robots\' content=\'noindex\'> to error pages using JavaScript." Re-run with --render to check automatically.',
-    'crawling-indexing/javascript/javascript-seo-basics');
+    (ghostFinal
+      ? `a nonexistent URL redirects to ${ghostFinal}, which returns HTTP 200. Google defines a soft 404 by CONTENT — "a URL that returns a page telling the user that the page does not exist and also a 200 (success) status code" — so this is a soft 404 only if that destination is an error page. A login or home page is a different problem: the URL should 404.`
+      : `a nonexistent URL returns HTTP 200 (soft 404). If this is a client-routed SPA, confirm the error page adds noindex via JS — "Add a <meta name="robots" content="noindex"> to error pages using JavaScript." Re-run with --render to check automatically.`),
+    ghostFinal ? 'crawling-indexing/troubleshoot-crawling-errors' : 'crawling-indexing/javascript/javascript-seo-basics');
 }
 
 // ---- main -------------------------------------------------------------------------------------
 await siteProbes();
 const { sitemaps } = await auditRobots();
 let urls = await auditSitemap(sitemaps);
-if (!urls.length) urls = [origin + '/'];
+// A sitemap tree that yields ZERO page URLs is a finding, not a quiet fallback. Auditing the
+// homepage and reporting '1 page audited' is the 'partial crawl that reads as all clear' failure.
+const urlsFromSitemap = urls.length > 0;
+if (!urls.length) { urls = [origin + '/']; add('high', 'sitemap', 'auto-fix', origin + '/', 'no page URLs were discovered from any sitemap — auditing the homepage only. Every <loc> the tool could reach was a sitemap, not a page.', 'sitemaps/build-sitemap'); }
+const srcLabel = urlsFromSitemap ? 'sitemap URL' : 'homepage (no sitemap URLs found)';
 const sameOrigin = urls.filter(sameSite);   // same HOST; http<->https of one host is one site
 const pages = sameOrigin.slice(0, MAX_PAGES);
 if (sameOrigin.length > MAX_PAGES) console.error(`[audit] NOTE: capping at ${MAX_PAGES} of ${sameOrigin.length} sitemap URLs (--max-pages to raise). Coverage is partial.`);
@@ -656,16 +684,16 @@ for (const u of pages) {
     // A 429/503/5xx is temporary -- Google retries these for ~2 days; a maintenance page is
     // supposed to be 503. Reporting it as a critical de-index (like a 404) is wrong, and the
     // fast crawl itself can induce 429s. Hand it off to re-run slower, don't fail the page.
-    if (isTransient(status)) add('medium', 'crawling', 'handoff', path, `sitemap URL is temporarily ${status} (transient — Google retries these; re-run slower if the crawl induced it)`, 'crawling-indexing/troubleshoot-crawling-errors');
-    else if (isBlocked(status)) add('medium', 'crawling', 'handoff', path, `sitemap URL returns ${status} to this crawler — usually bot protection or an auth wall, not a de-indexed page. Confirm Googlebot is not blocked.`, 'crawling-indexing/troubleshoot-crawling-errors');
-    else add('critical', 'indexing', 'auto-fix', path, `sitemap URL returns ${status}`, 'crawling-indexing/troubleshoot-crawling-errors');
+    if (isTransient(status)) add('medium', 'crawling', 'handoff', path, `${srcLabel} is temporarily ${status} (transient — Google retries these; re-run slower if the crawl induced it)`, 'crawling-indexing/troubleshoot-crawling-errors');
+    else if (isBlocked(status)) add('medium', 'crawling', 'handoff', path, `${srcLabel} returns ${status} to this crawler — usually bot protection or an auth wall, not a de-indexed page. Confirm Googlebot is not blocked.`, 'crawling-indexing/troubleshoot-crawling-errors');
+    else add('critical', 'indexing', 'auto-fix', path, `${srcLabel} returns ${status}`, 'crawling-indexing/troubleshoot-crawling-errors');
     continue;
   }
   if (norm(finalUrl) !== norm(u)) {
     // The body belongs to the DESTINATION. Auditing it under the source URL invents a second page:
     // its (correct) canonical looks like it "points elsewhere", and its title/description collide
     // with the real page. Report the stale sitemap entry and move on.
-    add('medium', 'indexing', 'auto-fix', path, `sitemap URL redirects to ${finalUrl} — list the final URL`, 'crawling-indexing/301-redirects');
+    add('medium', 'indexing', 'auto-fix', path, `${srcLabel} redirects to ${finalUrl} — list the final URL`, 'crawling-indexing/301-redirects');
     continue;
   }
   // A sitemap may legitimately list non-HTML URLs (PDFs, images). Don't score a PDF as an HTML
@@ -784,7 +812,7 @@ if (RENDER) {
   if (ghostIs200) {
     const gh = rendered.get(GHOST);
     const ok = gh && /\bnoindex\b/i.test(metaC(clean(gh), 'name', 'robots'));
-    if (!ok) add('high', 'crawling', 'auto-fix', GHOST, 'a nonexistent URL returns HTTP 200 and the rendered page carries no noindex — a soft 404 that Google can index', 'crawling-indexing/javascript/javascript-seo-basics');
+    if (!ok) add('high', 'crawling', 'auto-fix', GHOST, `a nonexistent URL ${ghostFinal ? `redirects to ${ghostFinal}, which returns HTTP 200,` : 'returns HTTP 200'} and the rendered page carries no noindex — a soft 404 that Google can index`, 'crawling-indexing/javascript/javascript-seo-basics');
     rendered.delete(GHOST); // not a real page; keep it out of the head-delta comparison AND the count
   }
   renderedUrls = new Set([...rendered.keys()].filter((k) => rendered.get(k)));

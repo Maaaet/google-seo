@@ -350,7 +350,13 @@ server.close();
 // If the binary crashed, no JSON was written. Turn that into a real FAIL rather than letting the
 // whole suite abort on readFileSync -- a crash in audit.mjs must redden the suite, not silence it.
 t('[e2e] the main audit run completed without crashing (JSON written)', existsSync(OUT));
-if (!existsSync(OUT)) { console.log(`\n${pass} passed, ${fail} failed`); process.exit(1); }
+if (!existsSync(OUT)) {
+  // The binary crashed. Say ABORTED loudly: a smaller pass count next to '0 failed' reads like a
+  // healthy suite, and a reviewer comparing '79 passed' to '172 passed' has no way to tell why.
+  console.log(`\nABORTED after ${pass + fail} assertions — audit.mjs crashed before writing JSON`);
+  console.log(`${pass} passed, ${fail} failed (SUITE DID NOT COMPLETE)`);
+  process.exit(1);
+}
 const findings = JSON.parse(readFileSync(OUT, 'utf8')).findings;
 unlinkSync(OUT);
 const has = (re) => findings.some((f) => re.test(f.message));
@@ -708,6 +714,83 @@ t('[e2e] two sibling sitemaps sharing a child is a diamond, not a cycle', !diCyc
 t('[e2e]  ...and the shared child\'s page is still audited', diD.pages >= 1 && !diD.findings.some((f) => /\/dpg/.test(String(f.where)) && /returns \d/.test(f.message)));
 t('[e2e] a MUTUAL cycle (a -> b -> a) is still reported', diCyc.some((f) => /m1\.xml/.test(String(f.where))));
 
+// SILENT PAGE LOSS. `c.xml` hangs off BOTH a deep parent (where the depth cap makes us decline to
+// descend) and the root (where we could). Recording the declined visit in `fetchedSitemaps` made the
+// root skip it, so /cpage vanished — and the audit then fell back to the homepage and reported
+// "sitemap URL returns 404" for `/`, a URL no sitemap ever listed. Never record work you declined.
+const loss = createServer((req, res) => {
+  const P = loss.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  const xml = (b) => { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(b); };
+  const index = (k) => `<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${k.map((x) => `<sitemap><loc>${B}${x}</loc></sitemap>`).join('')}</sitemapindex>`;
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${B}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') return xml(index(['/deep1.xml', '/c.xml']));  // deep path FIRST, then c.xml at depth 0
+  if (u === '/deep1.xml') return xml(index(['/deep2.xml']));
+  if (u === '/deep2.xml') return xml(index(['/c.xml']));                  // c.xml first reached AT the depth cap
+  if (u === '/c.xml') return xml(index(['/cleaf.xml']));
+  if (u === '/cleaf.xml') return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${B}/cpage</loc></url></urlset>`);
+  // deliberately NO meta description: /cpage must produce a finding only IT can produce, so the
+  // assertion below cannot be satisfied by the homepage fallback auditing some other page.
+  if (u === '/cpage') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('C page', '')); }
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => loss.listen(0, 'localhost', r));
+const LS = `http://localhost:${loss.address().port}`;
+const OUTLS = path.join(HERE, '.test-findings-ls.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), LS, '--json', OUTLS, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+loss.close();
+const lsD = JSON.parse(readFileSync(OUTLS, 'utf8')); unlinkSync(OUTLS);
+
+// POSITIVE: /cpage is genuinely audited. `pages >= 1` alone would ALSO be true of the homepage
+// fallback, so assert on a finding that only /cpage can produce.
+t('[e2e] an index declined at the depth cap is still descended via a shallower parent', lsD.findings.some((f) => String(f.where) === '/cpage' && /missing meta description/.test(f.message)));
+t('[e2e]  ...so the homepage fallback never fires', !lsD.findings.some((f) => /no page URLs were discovered/.test(f.message)));
+t('[e2e] the same defect reached through two parents is reported ONCE', lsD.findings.filter((f) => /c\.xml$/.test(String(f.where)) && /lists another sitemap index/.test(f.message)).length === 1);
+
+// A sitemap tree that yields ZERO pages must SAY so, not quietly audit the homepage and read clean.
+const empty = createServer((req, res) => {
+  const P = empty.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${B}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"></urlset>`); }
+  // 404 on purpose: the fallback URL must emit a STATUS finding, so its provenance label is observable.
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => empty.listen(0, 'localhost', r));
+const EM = `http://localhost:${empty.address().port}`;
+const OUTEM = path.join(HERE, '.test-findings-em.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), EM, '--json', OUTEM, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+empty.close();
+const emD = JSON.parse(readFileSync(OUTEM, 'utf8')); unlinkSync(OUTEM);
+t('[e2e] a sitemap yielding zero page URLs is REPORTED, not silently swapped for the homepage', emD.findings.some((f) => /no page URLs were discovered from any sitemap/.test(f.message)));
+// The fallback URL is NOT a sitemap URL. Asserting this in a fixture where the fallback never fires
+// proves nothing -- it must be asserted where a status finding for `/` actually exists.
+t('[e2e]  ...and the fallback URL emits a status finding at all (proves the label is observable)', emD.findings.some((f) => String(f.where) === '/' && / returns 404/.test(f.message)));
+t('[e2e]  ...whose provenance is the homepage, never called a "sitemap URL"', !emD.findings.some((f) => String(f.where) === '/' && /sitemap URL returns/.test(f.message)));
+
+// MAX_SITEMAPS bounded children WITHIN an index, but robots.txt may list any number of `Sitemap:`
+// directives and every one was fetched. Cap it — and SAY what was skipped, because a silent cap is
+// indistinguishable from a clean audit.
+const fan = createServer((req, res) => {
+  const P = fan.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\n${[1, 2, 3].map((i) => `Sitemap: ${B}/sm-${i}.xml`).join('\n')}\n`); }
+  const m = u.match(/^\/sm-(\d)\.xml$/);
+  if (m) { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${B}/fp${m[1]}</loc></url></urlset>`); }
+  if (/^\/fp\d$/.test(u)) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page(`Fan ${u}`, `<meta name="description" content="A page listed by one of several sibling sitemap directives.">`)); }
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => fan.listen(0, 'localhost', r));
+const FN = `http://localhost:${fan.address().port}`;
+const OUTFN = path.join(HERE, '.test-findings-fn.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), FN, '--json', OUTFN, '--quiet', '--max-sitemaps', '2'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+fan.close();
+const fnD = JSON.parse(readFileSync(OUTFN, 'utf8')); unlinkSync(OUTFN);
+
+t('[e2e] a capped robots.txt Sitemap: fan-out SAYS what it skipped', fnD.findings.some((f) => /lists 3 Sitemap: directives; audited the first 2/.test(f.message)));
+t('[e2e]  ...and the sitemaps under the cap were still audited (proves the cap, not a crash)', fnD.pages === 2);
+
+
 // [meta] SKILL.md's reference table drifted: 13 sheets on disk, 9 rows in the table, and README
 // said "9 distilled rule sheets". An agent reading SKILL.md would never learn the other four exist.
 // This is a real invariant (every sheet is reachable from the entry point), not a proxy for behavior.
@@ -721,6 +804,18 @@ t('[e2e] a MUTUAL cycle (a -> b -> a) is still reported', diCyc.some((f) => /m1\
   const readme = readFileSync(path.join(HERE, 'README.md'), 'utf8');
   const claimed = readme.match(/references\/\*\.md\s+(\d+) distilled rule sheets/)?.[1];
   t('[meta] README\'s sheet count matches the number on disk', Number(claimed) === onDisk.filter((f) => f !== 'COVERAGE.md').length);
+}
+
+// [lint] Two hazards that made a leftover mutation invisible for a whole round:
+//  - a literal NUL byte in audit.mjs (it came from a dedupe key) makes git and grep classify the
+//    file as BINARY. `git diff` prints "Binary files differ" and every grep silently matches nothing.
+//  - a mutation harness that is killed by a timeout never runs its restore, leaving `if (false)`
+//    wired into the shipped source. The suite went red, and the red looked like a bad test.
+{
+  const src = readFileSync(path.join(HERE, 'audit.mjs'), 'utf8');
+  t('[lint] audit.mjs has no literal NUL byte (git/grep would treat it as binary)', !/\u0000/.test(src));
+  t('[lint] audit.mjs has no `if (false)` (a mutation left behind by a killed harness)', !/\bif\s*\(\s*false\s*\)/.test(src));
+  t('[lint] audit.mjs has no `if (true)` short-circuit', !/\bif\s*\(\s*true\s*\)/.test(src));
 }
 
 // --render when EVERY sitemap URL redirects: must not spawn Chrome, must not hang, must say so.
@@ -777,5 +872,6 @@ t('[e2e] a spec-escaped self-canonical hub is not its own victim (no false CRITI
 const chainMsg = findings.find((f) => /Chained Shared Title/.test(f.message))?.message ?? '';
 t('[e2e] an hreflang chain counts as ONE page, so the message says 2 distinct pages', /^2 distinct pages share one <title>/.test(chainMsg));
 
-console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`);
+console.log(`\nSUITE COMPLETE`);
+console.log(`${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(fail ? 1 : 0);

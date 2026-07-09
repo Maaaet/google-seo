@@ -71,6 +71,12 @@ Findings are partitioned into:
 - **auto-fix** — a code change closes it. Your work list.
 - **handoff** — needs a human, Search Console, real content, or off-page work. The tool will not pretend to fix these, and neither should you.
 
+**It tells you what it did not do.** Every cap, truncation, skip and fallback emits its own finding —
+children beyond `--max-sitemaps`, `Sitemap:` directives beyond the cap, nesting below the depth cap,
+pages beyond `--max-pages`, and a sitemap tree that produced nothing. A partial crawl that reads as
+"all clear" is the worst output an auditor can produce. Identical findings reached through two paths
+(a shared template, a diamond in the sitemap graph) are reported once.
+
 ## What it checks
 
 **robots.txt** — reachable; not blocking all crawlers; `Sitemap:` present; **not disallowing your
@@ -78,8 +84,14 @@ JS/CSS** (because "Google Search won't render JavaScript from blocked files"); w
 have shut out.
 
 **Sitemaps** — the 50MB / 50,000-URL limits; UTF-8; absolute, entity-escaped, fragment-free `<loc>`;
-W3C-format `<lastmod>`; duplicate and cross-origin entries; sitemap-index nesting; and it flags
-`<priority>` / `<changefreq>`, which "Google ignores."
+W3C-format `<lastmod>`; duplicate and cross-host entries; and it flags `<priority>` / `<changefreq>`,
+which "Google ignores."
+
+Nested sitemap indexes (Jetpack, WordPress) are **reported and then followed** — the protocol has no
+nested-index form, but refusing to descend audits zero pages, which is worse. Bounded by depth, by a
+whole-tree fetch budget, and by a cycle guard that knows a *diamond* (two sibling `Sitemap:` lines
+pointing at one child) from a *loop*. A sitemap tree that yields **no page URLs at all** is itself a
+finding, not a quiet fallback to auditing the homepage.
 
 **Canonical** — at most one tag; absolute; no fragment; self-referencing; and the killer:
 **N distinct pages all canonicalizing to one URL**, which is how a shared SPA shell silently
