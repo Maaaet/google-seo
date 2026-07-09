@@ -65,8 +65,12 @@ const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
 // you audit https:// looked "cross-origin" on every URL -- 5,249 false findings on gnu.org, and
 // every page dropped from the crawl (the audit silently did nothing). A true cross-origin loc is a
 // different HOST (cooking.nytimes.com vs www.nytimes.com), and that is still caught.
-const HOST = (() => { try { return new URL(base).hostname; } catch { return ''; } })();
-const sameSite = (u) => { try { return new URL(u).hostname === HOST; } catch { return false; } };
+// ...and `www.example.com` / `example.com` are one site in practice (one redirects to the other).
+// Without this, auditing www while the sitemap lists apex URLs reproduces the exact "0 pages
+// audited" failure, just shifted. A real subdomain (cooking.nytimes.com) is still a different host.
+const bareHost = (h) => h.replace(/^www\./i, '');
+const HOST = (() => { try { return bareHost(new URL(base).hostname); } catch { return ''; } })();
+const sameSite = (u) => { try { return bareHost(new URL(u).hostname) === HOST; } catch { return false; } };
 // Strip a trailing slash from the PATH only. Operating on the full href would eat the slash inside
 // a query value (`?path=/a/b/`), collapsing two genuinely distinct URLs into one.
 const norm = (u) => {

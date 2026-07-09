@@ -516,24 +516,29 @@ t('[e2e] a 429 is a transient handoff, not a critical de-index', fmtFindings.som
 // SAME HOST, different SCHEME: a sitemap listing http:// locs while we audit the same host must NOT
 // be called cross-origin, and its pages must still be crawled. gnu.org emitted 5,249 false
 // "cross-origin" findings and audited ZERO pages. A genuinely foreign host is still reported, once.
+// NOTE the host is `localhost`, not `127.0.0.1`: `new URL('http://www.127.0.0.1/')` THROWS (a host
+// whose last label is numeric must parse as IPv4), so a loopback-IP fixture can never carry a `www.`
+// loc — it dies in validateLocs' catch as "not a valid URL" and never reaches sameSite(). That made
+// the www assertion below vacuously green. `www.localhost` parses.
 const scheme = createServer((req, res) => {
-  const b = `http://127.0.0.1:${scheme.address().port}`;
+  const b = `http://localhost:${scheme.address().port}`;
   const u = req.url.split('?')[0];
   if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${b}/sitemap.xml\n`); }
   if (u === '/sitemap.xml') {
     res.writeHead(200, { 'content-type': 'application/xml' });
-    // 3 same-host locs written with an explicit host+port (same host), + 2 locs on a foreign host
+    // same-host locs differing by scheme and by `www.`, + 2 locs on a genuinely foreign host
     return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
       `<url><loc>${b}/p1</loc></url><url><loc>${b}/p2</loc></url>` +
       `<url><loc>${b.replace('http://', 'https://')}/p3</loc></url>` +
+      `<url><loc>${b.replace('http://', 'http://www.')}/p4</loc></url>` +
       `<url><loc>http://other.example.com/a</loc></url><url><loc>http://other.example.com/b</loc></url>` +
       `</urlset>`);
   }
   if (u === '/p1' || u === '/p2') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page(`Page ${u}`, `<meta name="description" content="A same-host page reached over the audited scheme ${u}.">`)); }
   res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
 });
-await new Promise((r) => scheme.listen(0, '127.0.0.1', r));
-const SC = `http://127.0.0.1:${scheme.address().port}`;
+await new Promise((r) => scheme.listen(0, 'localhost', r));
+const SC = `http://localhost:${scheme.address().port}`;
 const OUTSC = path.join(HERE, '.test-findings-sc.json');
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), SC, '--json', OUTSC, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 scheme.close();
@@ -543,7 +548,12 @@ t('[e2e] same-host locs are crawled (pages audited > 0)', scData.pages >= 2);
 t('[e2e] a genuinely foreign host is reported exactly ONCE, not per-loc', scCross.length === 1);
 t('[e2e] the foreign-host finding names the host', scCross.length === 1 && /other\.example\.com/.test(scCross[0].message));
 // the discriminator: a same-host loc that differs only by SCHEME must not be called another host
-t('[e2e] a same-host http/https scheme difference is NOT reported as another host', !scCross.some((f) => /127\.0\.0\.1/.test(f.message)));
+t('[e2e] a same-host http/https scheme difference is NOT reported as another host', !scCross.some((f) => /\(localhost\)/.test(f.message)));
+// GUARD: the www loc must actually REACH sameSite(). If it is rejected as an invalid URL first
+// (as `www.127.0.0.1` was), the assertion below can never fail and proves nothing.
+t('[e2e] the www loc is a parseable URL (so it reaches the same-site test)', !scData.findings.some((f) => /not a valid URL/.test(f.message) && /www\./.test(f.message)));
+// www.<host> and <host> are one site: a www-prefixed loc must not be called another host
+t('[e2e] www.<host> is not reported as another host', !scCross.some((f) => /www\./.test(f.message)));
 t('[e2e] an UNQUOTED canonical pointing elsewhere is flagged, not silently missed', fmtFindings.some((f) => /\/unq-canon/.test(String(f.where)) && /canonical points at a different URL/.test(f.message)));
 t('[e2e] canonical as the LAST token of a multi-value rel is detected', fmtFindings.some((f) => /\/multitok-canon/.test(String(f.where)) && /canonical points at a different URL/.test(f.message)));
 t('[e2e] a 403 is a handoff (bot protection), not a critical de-index', fmtFindings.some((f) => /\/botblocked/.test(String(f.where)) && f.class === 'handoff') && !fmtFindings.some((f) => /\/botblocked/.test(String(f.where)) && f.severity === 'critical'));
