@@ -364,14 +364,24 @@ async function cdpHtml(wsUrl) {
 }
 
 // ---- site-level probes --------------------------------------------------------------------------
+const GHOST = origin + '/__google-seo-audit-probe-404__';
+let ghostIs200 = false;
+
 async function siteProbes() {
   if (new URL(base).protocol !== 'https:') add('high', 'page-experience', 'auto-fix', origin, 'site is not served over HTTPS', 'appearance/page-experience');
 
-  // Soft 404: a URL that cannot exist must not answer 200. Google treats a 200 error page as a
-  // "soft 404" and it wastes crawl budget on pages that should never be indexed.
-  const ghost = origin + '/__google-seo-audit-probe-404__';
-  const r = await get(ghost);
-  if (r.status === 200) add('high', 'crawling', 'auto-fix', ghost, 'a nonexistent URL returns HTTP 200 (soft 404) — return a real 404/410', 'crawling-indexing/troubleshoot-crawling-errors');
+  // Soft 404: a URL that cannot exist must not answer 200.
+  const r = await get(GHOST);
+  ghostIs200 = r.status === 200;
+  if (!ghostIs200) return;
+  if (/\bnoindex\b/i.test(metaC(decomment(r.body), 'name', 'robots'))) return; // already handled in source
+
+  // A client-routed SPA usually CANNOT return 404 -- Google's sanctioned remedy is a JS-injected
+  // noindex, which raw HTML can't show. Don't call that broken; say what still needs proving.
+  if (RENDER) return;  // the render pass below decides
+  add('medium', 'crawling', 'handoff', GHOST,
+    'a nonexistent URL returns HTTP 200 (soft 404). If this is a client-routed SPA, confirm the error page adds noindex via JS — "Add a <meta name=\'robots\' content=\'noindex\'> to error pages using JavaScript." Re-run with --render to check automatically.',
+    'crawling-indexing/javascript/javascript-seo-basics');
 }
 
 // ---- main -------------------------------------------------------------------------------------
@@ -437,7 +447,17 @@ for (const [label, map, sev, doc] of [['<title>', seenTitle, 'high', 'appearance
 
 // raw-vs-rendered delta: the AI-crawler blind spot
 if (RENDER) {
-  const rendered = await renderedHtml(pages.slice(0, Math.min(pages.length, 25)));
+  const batch = pages.slice(0, Math.min(pages.length, 25));
+  if (ghostIs200) batch.push(GHOST); // settle the soft-404 question in the same Chrome session
+  const rendered = await renderedHtml(batch);
+
+  if (ghostIs200) {
+    const gh = rendered.get(GHOST);
+    const ok = gh && /\bnoindex\b/i.test(metaC(decomment(gh), 'name', 'robots'));
+    if (!ok) add('high', 'crawling', 'auto-fix', GHOST, 'a nonexistent URL returns HTTP 200 and the rendered page carries no noindex — a soft 404 that Google can index', 'crawling-indexing/javascript/javascript-seo-basics');
+    rendered.delete(GHOST); // not a real page; keep it out of the head-delta comparison
+  }
+
   for (const [u, html] of rendered) {
     if (!html) continue;
     const rv = auditHtml(html, u, 'rendered');
