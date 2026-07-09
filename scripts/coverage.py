@@ -18,9 +18,16 @@ for f in list((ROOT / "references").glob("*.md")) + [ROOT / "SKILL.md", ROOT / "
     prose.append(f.read_text(errors="replace"))
 blob = "\n".join(prose)
 for p in pages:
-    stem = p.rsplit("/", 1)[-1][:-3]
-    # cited if the full path appears, or the page's unique slug appears as a doc reference
-    if p in blob or re.search(rf"(?<![\w-]){re.escape(stem)}(?![\w-])", blob):
+    # A page counts as cited only when something PATH-SHAPED points at it: the full repo path, or
+    # the path with the docs/ prefix stripped (e.g. "crawling-indexing/sitemaps/build-sitemap").
+    # Matching a bare stem would score `video.md` as covered because some sheet says "video" --
+    # which is how the first version of this script reported a fraudulent 158/158.
+    rel = p.replace("docs/search/docs/", "").replace("docs/crawling/docs/", "")[:-3]
+    if "/" not in rel:                     # top-level hub pages: require the full path
+        if p in blob:
+            cited.add(p)
+        continue
+    if p in blob or rel in blob:
         cited.add(p)
 
 missing = [p for p in pages if p not in cited]
