@@ -62,7 +62,8 @@ node audit.mjs https://example.com --noindex-ok /admin,/preview
 | `--noindex-ok a,b` | Paths where `noindex` is deliberate. |
 | `--quiet` | Findings only. |
 
-Exit codes: `0` clean · `1` auto-fix findings remain · `2` crawl/setup error. Suitable for CI.
+Exit codes: `0` = no code-fixable findings (handoff items may still be printed) · `1` = auto-fix
+findings remain · `2` = crawl/setup error. Suitable for CI.
 
 Findings are partitioned into:
 

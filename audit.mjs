@@ -392,7 +392,8 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
       add('high', 'canonical', 'auto-fix', path, `Link: rel=canonical header (${hdrCanon}) disagrees with the HTML canonical (${canonical})`, 'consolidate-duplicate-urls');
     }
 
-    // Crawlable links: "use <a> tags with href attributes". onclick/javascript: nav is not crawled.
+    // Crawlable links: "Google can only crawl your link if it's an <a> HTML element ... with an
+    // href attribute" (links-crawlable). onclick / javascript: navigation is not crawled.
     const fakeNav = [...html.matchAll(/<a\b[^>]*>/gi)].map((m) => m[0])
       // `javascript:` with ANY payload (void(0), doThing()) is non-crawlable; a bare `#` is too,
       // but `#section` is a legitimate in-page anchor and must not count.

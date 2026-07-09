@@ -102,7 +102,8 @@ node audit.mjs <baseUrl> [--render] [--json out.json] [--max-pages N] [--max-ren
 - `--render` drives headless Chrome over the DevTools Protocol (set `CHROME=/path` if not
   auto-found) and diffs raw vs rendered `<head>`. Needs Node ≥ 22. Only the first `--max-render`
   pages (default 25) are rendered; the rest are audited raw-only and the report says which.
-- Exit `0` clean · `1` auto-fix findings remain · `2` crawl/setup error.
+- Exit `0` = no code-fixable findings (handoff items may still print) · `1` = auto-fix findings
+  remain · `2` = crawl/setup error.
 - Coverage is capped by `--max-pages` (default 100) and **logs what it skipped** — a partial crawl
   that reads as "all clear" is the worst possible output.
 

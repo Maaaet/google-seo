@@ -187,6 +187,10 @@ const ROUTES = {
 <url><loc>{B}/hub?a=1&amp;b=2</loc></url>
 <url><loc>{B}/vic1</loc></url>
 <url><loc>{B}/vic2</loc></url>
+<url><loc>{B}/realhub</loc></url>
+<url><loc>{B}/rv1</loc></url>
+<url><loc>{B}/rv2</loc></url>
+<url><loc>{B}/rv3</loc></url>
 <url><loc>{B}/amp-canonical?b=1&amp;c=2</loc></url>
 </urlset>`],
   '/ok': ['text/html', page('Unique OK page', '<meta name="description" content="A page that is fine and it&#39;s quoted properly here.">')],
@@ -216,6 +220,12 @@ const ROUTES = {
   '/hub': ['text/html', page('Hub page', '<meta name="description" content="A hub that correctly self canonicalizes."><link rel="canonical" href="{B}/hub?a=1&amp;b=2">')],
   '/vic1': ['text/html', page('Victim one', '<meta name="description" content="This page canonicalizes to the hub, victim one."><link rel="canonical" href="{B}/hub?a=1&amp;b=2">')],
   '/vic2': ['text/html', page('Victim two', '<meta name="description" content="This page canonicalizes to the hub, victim two."><link rel="canonical" href="{B}/hub?a=1&amp;b=2">')],
+  // POSITIVE polarity for the consolidation CRITICAL: three real victims all canonicalize to one
+  // page. This is the shape that silently de-indexes a site, and it MUST fire.
+  '/realhub': ['text/html', page('Real hub page', '<meta name="description" content="The real hub these three pages point at."><link rel="canonical" href="{B}/realhub">')],
+  '/rv1': ['text/html', page('Real victim one', '<meta name="description" content="Victim one of the real hub here."><link rel="canonical" href="{B}/realhub">')],
+  '/rv2': ['text/html', page('Real victim two', '<meta name="description" content="Victim two of the real hub here."><link rel="canonical" href="{B}/realhub">')],
+  '/rv3': ['text/html', page('Real victim three', '<meta name="description" content="Victim three of the real hub here."><link rel="canonical" href="{B}/realhub">')],
   '/bad-entity': ['text/html', page('Bad&#1114112;Entity Title', '<meta name="description" content="Title carries an out of range character reference.">')],
   // a spec-correct page: both the sitemap <loc> and the canonical escape & as &amp;
   '/amp-canonical': ['text/html', page('Ampersand canonical page', '<meta name="description" content="Canonical and loc both escape the ampersand."><link rel="canonical" href="{B}/amp-canonical?b=1&amp;c=2">')],
@@ -297,7 +307,9 @@ t('[e2e] a correctly-escaped &amp; canonical is NOT called a different URL', !on
 t('[e2e] a <title> inside a <script> does not create a phantom duplicate', !findings.some((f) => /Fake Script Title/.test(f.message)));
 t('[e2e] <img> strings inside JSON-LD are not counted as images', !onPage('/jsonld-img', /without alt/));
 t('[e2e] JSON-LD is still parsed (structured data checks not blinded)', findings.every((f) => !/JSON-LD block does not parse/.test(f.message)));
-t('[e2e] a spec-escaped self-canonical hub is not its own victim (no false CRITICAL)', !findings.some((f) => f.severity === 'critical' && /declare canonical/.test(f.message)));
+// both polarities of the consolidation CRITICAL
+t('[e2e] 3 pages canonicalizing to one DOES fire the consolidation CRITICAL', findings.some((f) => f.severity === 'critical' && /3 distinct pages declare canonical/.test(f.message) && /realhub/.test(f.message)));
+t('[e2e] a spec-escaped self-canonical hub is not its own victim (no false CRITICAL)', !findings.some((f) => f.severity === 'critical' && /declare canonical/.test(f.message) && /\/hub/.test(f.message)));
 // the chain shares one <title>: 3 language variants + 1 unrelated page = 2 distinct pages, not 3
 const chainMsg = findings.find((f) => /Chained Shared Title/.test(f.message))?.message ?? '';
 t('[e2e] an hreflang chain counts as ONE page, so the message says 2 distinct pages', /^2 distinct pages share one <title>/.test(chainMsg));
