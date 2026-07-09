@@ -74,6 +74,12 @@ const hasCanon = (h) => new RegExp(`<link[^>]*${REL2('canonical')}`, 'i').test(h
 t("rel=\"canonical alternate\" is canonical", hasCanon('<link rel="canonical alternate" href=x>'));
 t("rel=\"alternate canonical\" (canonical last) is canonical", hasCanon('<link rel="alternate canonical" href=x>'));
 t("rel=alternate alone is NOT canonical", !hasCanon('<link rel=alternate href=x>'));
+// the multi-token prefix must not bleed across attributes into href/data values
+t("canonical inside an href value is NOT a canonical rel", !hasCanon('<link rel=alternate href=/canonical-page>'));
+t("canonical inside a quoted data attr is NOT a canonical rel", !hasCanon('<link rel=next data-note="use canonical">'));
+t("canonical inside an unquoted data attr is NOT a canonical rel", !hasCanon('<link rel=next data-note=canonical>'));
+t("quoted rel=alternate + canonical in href is NOT canonical", !hasCanon('<link rel="alternate" hreflang="en" href="/canonical">'));
+t("rel=stylesheet is NOT canonical", !hasCanon('<link rel="stylesheet" href=x>'));
 const looksGz = (b) => b.length > 2 && b[0] === 0x1f && b[1] === 0x8b;
 t("plain-XML bytes are not treated as gzip", !looksGz(Buffer.from('<?xml ...')));
 t("real gzip magic is detected", looksGz(gzipSync(Buffer.from('x'))));
