@@ -167,10 +167,13 @@ async function auditRobots() {
     if (!blocksAll(b)) continue;
     // Google-Extended governs Gemini/Vertex model TRAINING, not Search or AI-Overviews citation --
     // blocking it does not remove you from any answer surface, unlike the answer-engine crawlers.
-    const msg = b === 'Google-Extended'
-      ? 'Google-Extended is disallowed — this only blocks Gemini/Vertex model training, NOT Google Search or AI-Overviews citation'
-      : `${b} is fully disallowed — that engine cannot cite this site`;
-    add('medium', 'ai-search', 'handoff', '/robots.txt', msg, 'robots/intro');
+    if (b === 'Google-Extended') {
+      // Google-Extended governs "AI training and grounding in some of Google's other systems", NOT
+      // Search or AI Overviews (which run on Googlebot). Blocking it removes you from no answer surface.
+      add('low', 'ai-search', 'handoff', '/robots.txt', 'Google-Extended is disallowed — this limits AI training/grounding in some of Google\'s other systems, NOT Google Search or AI Overviews citation', 'appearance/ai-features');
+    } else {
+      add('medium', 'ai-search', 'handoff', '/robots.txt', `${b} is fully disallowed — that engine cannot cite this site`, 'robots/intro');
+    }
   }
   if (Buffer.byteLength(body, 'utf8') > 500 * 1024) add('medium', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt exceeds 500 KiB — "Google enforces a robots.txt file size limit of 500 kibibytes"', 'crawling/robots-txt/robots-txt-spec');
   const sitemaps = [...body.matchAll(/^\s*Sitemap:\s*(\S+)/gim)].map((m) => m[1]);
