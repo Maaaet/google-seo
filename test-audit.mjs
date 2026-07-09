@@ -42,5 +42,30 @@ t('#6 ?lang variants distinct', norm('https://example.com/r?lang=en')!==norm('ht
 t('#1 per-child sitemap audit exists', src.includes('function auditOneSitemap') && src.includes('for (const child of top)'));
 t('#1 no silent slice(0,50) / slice(0,500)', !src.includes('locs.slice(0, 50)') && !src.includes('locs.slice(0, 500)'));
 t('#5 exit is autoFix-only + documented', src.includes('exit(autoFix.length ? 1 : 0)') && src.includes('handoff items may still be printed'));
+
+
+// ---- round 2 regressions ----
+const src2 = readFileSync('/Users/r/code/google-seo/audit.mjs','utf8');
+const ATTR2=(n)=>`${n}=(["'])((?:(?!\\1).)*)\\1`, UNQ2=(n)=>`${n}=([^\\s"'>]+)`;
+const metaC2=(h,a,k)=>h.match(new RegExp(`<meta[^>]*${a}=["']${k}["'][^>]*${ATTR2('content')}`,'i'))?.[2]
+  ?? h.match(new RegExp(`<meta[^>]*${ATTR2('content')}[^>]*${a}=["']${k}["']`,'i'))?.[2]
+  ?? h.match(new RegExp(`<meta[^>]*${a}=["']${k}["'][^>]*${UNQ2('content')}`,'i'))?.[1]
+  ?? h.match(new RegExp(`<meta[^>]*${UNQ2('content')}[^>]*${a}=["']${k}["']`,'i'))?.[1] ?? '';
+t('#R2-6 unquoted content= is captured', metaC2('<meta name="description" content=RealDesc>','name','description')==='RealDesc');
+t('#R2-6 quoted still wins', metaC2('<meta name="description" content="a b">','name','description')==='a b');
+t('#R2-6 empty content is still "missing"', metaC2('<meta name="description" content="">','name','description')==='');
+
+const pgParam=(u)=>[...new URL(u).searchParams.keys()].find(k=>/^page$/i.test(k));
+t('#R2-3 ?p=456 (WP post id) is NOT pagination', pgParam('https://x.com/?p=456')===undefined);
+t('#R2-3 ?page=3 IS pagination', pgParam('https://x.com/?page=3')==='page');
+
+t('#R2-2 amphtml resolves against page url',
+  new URL('amp','https://x.com/blog/post').href==='https://x.com/blog/amp' && src2.includes('new URL(v.amphtml, u).href'));
+t('#R2-1 nested sitemap index is flagged, not crawled as pages', src2.includes('nested indexes are not supported') && src2.includes('if (childIsIndex)'));
+t('#R2-4 every Sitemap: directive is audited', src2.includes('for (const sm of list) all.push('));
+t('#R2-5 canonicalByUrl dead code removed', !src2.includes('canonicalByUrl'));
+t('#R2-utf8 only a declared non-UTF-8 encoding is an error', src2.includes('declares encoding=') && !src2.includes("'does not declare UTF-8 encoding'"));
+t('#R2-dup noindex reported once (raw only)', src2.includes("if (view === 'raw' && /\\b(noindex|none)\\b/i"));
+t('#R2-dup structured data not double-reported', src2.includes('const skipSd ='));
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail?1:0);

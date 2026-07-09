@@ -69,8 +69,13 @@ const tagText = (h, t) => [...h.matchAll(new RegExp(`<${t}\\b[^>]*>([\\s\\S]*?)<
 // the capture at the first apostrophe, so content="it's great" captured "it" -- which then read as a
 // missing description, or grouped every contraction-sharing page as a "duplicate".
 const ATTR = (name) => `${name}=(["'])((?:(?!\\1).)*)\\1`;
+// HTML5 allows unquoted attribute values for space-free content; without this fallback a valid
+// `content=Something` reads as an empty description and gets reported "missing".
+const UNQ = (name) => `${name}=([^\\s"'>]+)`;
 const metaC = (h, attr, key) => h.match(new RegExp(`<meta[^>]*${attr}=["']${key}["'][^>]*${ATTR('content')}`, 'i'))?.[2]
-  ?? h.match(new RegExp(`<meta[^>]*${ATTR('content')}[^>]*${attr}=["']${key}["']`, 'i'))?.[2] ?? '';
+  ?? h.match(new RegExp(`<meta[^>]*${ATTR('content')}[^>]*${attr}=["']${key}["']`, 'i'))?.[2]
+  ?? h.match(new RegExp(`<meta[^>]*${attr}=["']${key}["'][^>]*${UNQ('content')}`, 'i'))?.[1]
+  ?? h.match(new RegExp(`<meta[^>]*${UNQ('content')}[^>]*${attr}=["']${key}["']`, 'i'))?.[1] ?? '';
 const linkHref = (h, rel) => h.match(new RegExp(`<link[^>]*rel=["']${rel}["'][^>]*${ATTR('href')}`, 'i'))?.[2]
   ?? h.match(new RegExp(`<link[^>]*${ATTR('href')}[^>]*rel=["']${rel}["']`, 'i'))?.[2] ?? '';
 const allCanonicals = (h) => [...h.matchAll(/<link[^>]*rel=["']canonical["'][^>]*>/gi)].map((m) => m[0]);
@@ -133,7 +138,10 @@ const MAX_URLS = 50000, MAX_BYTES = 50 * 1024 * 1024;
 function auditOneSitemap(url, body, headers, { isIndex }) {
   const ctype = headers.get?.('content-type') || '';
   if (!/xml/i.test(ctype)) add('medium', 'sitemap', 'auto-fix', url, `Content-Type is "${ctype}" (expected XML)`, 'sitemaps/build-sitemap');
-  if (!/encoding=["']UTF-8["']/i.test(body) && !/charset=utf-8/i.test(ctype)) add('medium', 'sitemap', 'auto-fix', url, 'does not declare UTF-8 encoding', 'sitemaps/build-sitemap');
+  // XML defaults to UTF-8, so an absent declaration is fine. Only a declared NON-UTF-8 encoding
+  // violates "The sitemap file must be UTF-8 encoded."
+  const declEnc = body.match(/<\?xml[^>]*encoding=["']([^"']+)["']/i)?.[1];
+  if (declEnc && !/^utf-?8$/i.test(declEnc)) add('high', 'sitemap', 'auto-fix', url, `declares encoding="${declEnc}" — "The sitemap file must be UTF-8 encoded"`, 'sitemaps/build-sitemap');
 
   const bytes = Buffer.byteLength(body, 'utf8');
   if (bytes > MAX_BYTES) add('critical', 'sitemap', 'auto-fix', url, `${(bytes / 1048576).toFixed(1)}MB (limit 50MB uncompressed)`, 'sitemaps/large-sitemaps');
@@ -163,10 +171,10 @@ function validateLocs(locs, where) {
   }
 }
 
-async function auditSitemap(smUrls) {
-  const url = smUrls[0] || origin + '/sitemap.xml';
+// Audit ONE sitemap URL (standalone or index) and return the PAGE urls it yields.
+async function auditSitemapTree(url) {
   const { status, body, headers } = await get(url);
-  if (status !== 200) { add('high', 'sitemap', 'auto-fix', '/sitemap.xml', `sitemap not 200 (got ${status})`, 'sitemaps/build-sitemap'); return []; }
+  if (status !== 200) { add('high', 'sitemap', 'auto-fix', url, `sitemap not 200 (got ${status})`, 'sitemaps/build-sitemap'); return []; }
 
   const isIndex = /<sitemapindex/i.test(body);
   const top = auditOneSitemap(url, body, headers, { isIndex });
@@ -183,7 +191,15 @@ async function auditSitemap(smUrls) {
   for (const child of top) {
     const r = await get(child);
     if (r.status !== 200) { add('high', 'sitemap', 'auto-fix', child, `child sitemap not 200 (got ${r.status})`, 'sitemaps/large-sitemaps'); continue; }
-    const locs = auditOneSitemap(child, r.body, r.headers, { isIndex: /<sitemapindex/i.test(r.body) });
+    const childIsIndex = /<sitemapindex/i.test(r.body);
+    const locs = auditOneSitemap(child, r.body, r.headers, { isIndex: childIsIndex });
+    if (childIsIndex) {
+      // An index whose child is an index. Do NOT treat the grandchild sitemap URLs as pages --
+      // they'd be fetched and scored as HTML ("missing <title>" on an .xml file), while the real
+      // pages never get audited at all.
+      add('high', 'sitemap', 'auto-fix', child, 'a sitemap index lists another sitemap index — nested indexes are not supported; point the index at urlset sitemaps', 'sitemaps/large-sitemaps');
+      continue;
+    }
     validateLocs(locs, child);
     all.push(...locs);
   }
@@ -192,10 +208,18 @@ async function auditSitemap(smUrls) {
   return [...new Set(all)];
 }
 
+// robots.txt may list SEVERAL sibling Sitemap: directives (pages / news / images). Auditing only
+// the first silently drops every page in the rest.
+async function auditSitemap(smUrls) {
+  const list = smUrls.length ? smUrls : [origin + '/sitemap.xml'];
+  const all = [];
+  for (const sm of list) all.push(...await auditSitemapTree(sm));
+  return [...new Set(all)];
+}
+
 // ---- per page ---------------------------------------------------------------------------------
 const seenTitle = new Map(), seenDesc = new Map(), canonicalTargets = new Map();
 const hreflangGraph = new Map();   // url -> Set(alternate urls it declares)
-const canonicalByUrl = new Map();  // exact sitemap url -> exact canonical string (raw, unnormalized)
 
 function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   const html = decomment(rawHtml);
@@ -226,7 +250,6 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     if (view === 'raw') {
       const t = norm(canonical);
       canonicalTargets.set(t, [...(canonicalTargets.get(t) || []), path]);
-      canonicalByUrl.set(url, canonical);
       if (t !== norm(url)) add('high', 'canonical', 'auto-fix', path, `canonical points at a different URL: ${canonical}`, 'consolidate-duplicate-urls');
       // BYTE-match, not normalized match. norm() deliberately collapses trailing slashes, so a
       // sitemap listing /foo/ while the page canonicalizes to /foo would otherwise slip through --
@@ -243,7 +266,9 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   const robots = metaC(html, 'name', 'robots') || metaC(html, 'name', 'googlebot') || '';
   const xrobots = headers?.get?.('x-robots-tag') || '';
   // "none" is equivalent to "noindex, nofollow" — a page carrying it is fully blocked.
-  if (/\b(noindex|none)\b/i.test(robots + ' ' + xrobots) && !NOINDEX_OK.includes(new URL(url).pathname)) {
+  // Raw view only: the rendered pass would re-report the identical tag with a [rendered] prefix.
+  // A noindex that ONLY appears after JS is caught by the raw-vs-rendered delta instead.
+  if (view === 'raw' && /\b(noindex|none)\b/i.test(robots + ' ' + xrobots) && !NOINDEX_OK.includes(new URL(url).pathname)) {
     add('critical', 'indexing', 'handoff', path, `${tag}page is noindex ("${robots || xrobots}") — a human must confirm this is intentional`, 'crawling-indexing/block-indexing');
   }
 
@@ -256,8 +281,10 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     if (view === 'raw') hreflangGraph.set(norm(url), new Set(out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default').map((h) => norm(h.href))));
   }
 
-  // structured data
-  for (const blk of jsonLdBlocks(html)) {
+  // structured data. Rendered view only re-checks when raw carried NO JSON-LD at all, otherwise
+  // every block is reported twice.
+  const skipSd = view === 'rendered' && (rawViews.get(url)?.jsonLdTypes?.length ?? 0) > 0;
+  for (const blk of (skipSd ? [] : jsonLdBlocks(html))) {
     try {
       const data = JSON.parse(blk);
       const nodes = Array.isArray(data) ? data : data['@graph'] || [data];
@@ -307,8 +334,10 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
 
     // "Don't use the first page of a paginated sequence as the canonical page. Instead, give each
     // page its own canonical URL." Only assert when this URL IS a paginated page.
+    // Only `page`. `?p=456` is WordPress's post-ID permalink, not a paginated sequence, and it
+    // canonicalizes to the pretty URL by design — treating `p` as pagination flags that as a bug.
     const u = new URL(url);
-    const pageParam = [...u.searchParams.keys()].find((k) => /^(page|p)$/i.test(k));
+    const pageParam = [...u.searchParams.keys()].find((k) => /^page$/i.test(k));
     if (pageParam && Number(u.searchParams.get(pageParam)) > 1 && canonical) {
       const c = new URL(canonical, origin);
       if (!c.searchParams.has(pageParam)) add('high', 'canonical', 'auto-fix', path, `paginated page canonicalizes to page 1 (${canonical}) — "give each page its own canonical URL"`, 'specialty/ecommerce/pagination-and-incremental-page-loading');
@@ -412,7 +441,8 @@ for (const [target, srcs] of canonicalTargets) {
 // declared AMP page and confirm its rel=canonical points back. Only runs when AMP is in use.
 for (const [u, v] of rawViews) {
   if (!v.amphtml) continue;
-  const amp = new URL(v.amphtml, origin).href;
+  // Resolve against the PAGE url, not the origin: href="amp" on /blog/post means /blog/amp.
+  const amp = new URL(v.amphtml, u).href;
   const r = await get(amp);
   const p = new URL(u).pathname;
   if (r.status !== 200) { add('high', 'amp', 'auto-fix', p, `rel=amphtml points at ${amp}, which returns ${r.status}`, 'crawling-indexing/amp/validate-amp'); continue; }
@@ -476,16 +506,20 @@ findings.sort((a, b) => SEV_ORDER[a.severity] - SEV_ORDER[b.severity] || a.area.
 const autoFix = findings.filter((f) => f.class === 'auto-fix');
 const handoff = findings.filter((f) => f.class !== 'auto-fix');
 
+// --quiet suppresses the HEADER, not the findings. A "quiet" run that prints nothing is
+// indistinguishable from a clean one.
 if (!QUIET) {
   console.log(`\n# SEO audit — ${origin}`);
   console.log(`pages audited: ${pages.length}${RENDER ? ' (raw + rendered)' : ' (raw HTML only; add --render for the JS delta)'}`);
   console.log(`findings: ${findings.length}  |  auto-fix: ${autoFix.length}  |  handoff: ${handoff.length}\n`);
-  for (const grp of [['AUTO-FIX (code changes)', autoFix], ['HANDOFF (human / GSC / content)', handoff]]) {
-    if (!grp[1].length) continue;
-    console.log(`## ${grp[0]}`);
-    for (const f of grp[1]) console.log(`- [${f.severity}] (${f.area}) ${f.where} — ${f.message}  ‹${f.doc}›`);
-    console.log('');
-  }
+}
+for (const grp of [['AUTO-FIX (code changes)', autoFix], ['HANDOFF (human / GSC / content)', handoff]]) {
+  if (!grp[1].length) continue;
+  if (!QUIET) console.log(`## ${grp[0]}`);
+  for (const f of grp[1]) console.log(`- [${f.severity}] (${f.area}) ${f.where} — ${f.message}  ‹${f.doc}›`);
+  if (!QUIET) console.log('');
+}
+if (!QUIET) {
   if (!findings.length) console.log('CLEAN — no findings.\n');
   else if (!autoFix.length) console.log(`No code-fixable defects. ${handoff.length} item(s) need a human — exiting 0.\n`);
 }
