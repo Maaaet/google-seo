@@ -24,6 +24,17 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 let pass = 0, fail = 0;
 const t = (name, cond) => { cond ? pass++ : fail++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}`); };
 
+// SELF-LINT: an assertion of the form `X || !Y` is the escape-clause shape that made four separate
+// assertions vacuously green across this project's review. Ban it in our own test bodies.
+{
+  const self = readFileSync(fileURLToPath(import.meta.url), 'utf8');
+  const stripLiterals = (l) => l.replace(/`[^`]*`|'[^']*'|"[^"]*"/g, "''");
+  const offenders = self.split('\n')
+    .map((l, i) => [i + 1, l])
+    .filter(([, l]) => /^\s*t\(/.test(l) && /\|\|\s*!/.test(stripLiterals(l)));
+  t(`[lint] no assertion uses an "|| !" escape clause${offenders.length ? ': line ' + offenders.map(([n]) => n).join(', ') : ''}`, offenders.length === 0);
+}
+
 // ---------------------------------------------------------------- unit: pure helpers ------------
 const ATTR = (n) => `${n}=(["'])((?:(?!\\1).)*)\\1`;
 const UNQ = (n) => `\\s${n}=([^\\s"'>]+)`;
