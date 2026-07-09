@@ -236,6 +236,8 @@ const ROUTES = {
 <url><loc>{B}/no-viewport</loc></url>
 <url><loc>{B}/img-preview</loc></url>
 <url><loc>{B}/bare-alt</loc></url>
+<url><loc>{B}/bad-amphtml</loc></url>
+<url><loc>{B}/doc.pdf</loc></url>
 <url><loc>{B}/amp-canonical?b=1&amp;c=2</loc></url>
 </urlset>`],
   '/ok': ['text/html', page('Unique OK page', '<meta name="description" content="A page that is fine and it&#39;s quoted properly here.">')],
@@ -285,6 +287,10 @@ const ROUTES = {
   // max-image-preview:none is fully indexable -- must NOT raise a noindex CRITICAL
   '/img-preview': ['text/html', '<!doctype html><html lang=en><head><meta name=viewport content="width=device-width"><meta name="robots" content="max-image-preview:none, max-snippet:-1"><title>Image preview limited</title><meta name="description" content="This page limits image preview but is indexable."></head><body><h1>H</h1></body></html>'],
   // a bare alt attribute is present, not missing
+  // a malformed rel=amphtml href must not crash the audit (unguarded new URL threw)
+  '/bad-amphtml': ['text/html', '<!doctype html><html lang=en><head><meta name=viewport content="width=device-width"><title>Bad amphtml page</title><meta name="description" content="Carries a malformed amphtml link."><link rel="amphtml" href="http://"></head><body><h1>H</h1></body></html>'],
+  // a non-HTML sitemap URL (PDF) must not be scored as an HTML page
+  '/doc.pdf': ['application/pdf', '%PDF-1.4 not real html at all'],
   '/bare-alt': ['text/html', '<!doctype html><html lang=en><head><meta name=viewport content="width=device-width"><title>Bare alt page</title><meta name="description" content="Its image carries a bare alt attribute."></head><body><h1>H</h1><img src="/decorative.png" alt loading="lazy"></body></html>'],
   '/no-viewport': ['text/html', '<!doctype html><html lang=en><head><title>No viewport page</title><meta name="description" content="This page has no viewport meta tag at all."></head><body><h1>H</h1></body></html>'],
   '/bad-entity': ['text/html', page('Bad&#1114112;Entity Title', '<meta name="description" content="Title carries an out of range character reference.">')],
@@ -313,6 +319,10 @@ const code = await new Promise((resolve) => {
 });
 server.close();
 
+// If the binary crashed, no JSON was written. Turn that into a real FAIL rather than letting the
+// whole suite abort on readFileSync -- a crash in audit.mjs must redden the suite, not silence it.
+t('[e2e] the main audit run completed without crashing (JSON written)', existsSync(OUT));
+if (!existsSync(OUT)) { console.log(`\n${pass} passed, ${fail} failed`); process.exit(1); }
 const findings = JSON.parse(readFileSync(OUT, 'utf8')).findings;
 unlinkSync(OUT);
 const has = (re) => findings.some((f) => re.test(f.message));
@@ -402,6 +412,22 @@ contentBlock.close();
 const cbFindings = JSON.parse(readFileSync(OUTC, 'utf8')).findings; unlinkSync(OUTC);
 t('[e2e] a Googlebot content-path disallow (/build-guide) is not a render-resource CRITICAL', !cbFindings.some((f) => /blocking render resources/.test(f.message)));
 
+// POSITIVE polarity: blocking an actual asset dir for Googlebot MUST fire the render-resource CRITICAL.
+const assetBlock = createServer((req, res) => {
+  const b = `http://127.0.0.1:${assetBlock.address().port}`;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nDisallow: /assets\n\nSitemap: ${b}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${b}/p</loc></url></urlset>`); }
+  res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('Asset-block page', '<meta name="description" content="Its robots.txt blocks the assets directory.">'));
+});
+await new Promise((r) => assetBlock.listen(0, '127.0.0.1', r));
+const AB = `http://127.0.0.1:${assetBlock.address().port}`;
+const OUTA = path.join(HERE, '.test-findings-ab.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), AB, '--json', OUTA, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+assetBlock.close();
+const abFindings = JSON.parse(readFileSync(OUTA, 'utf8')).findings; unlinkSync(OUTA);
+t('[e2e] blocking /assets for Googlebot DOES fire the render-resource CRITICAL', abFindings.some((f) => /blocking render resources/.test(f.message) && f.severity === 'critical'));
+
 // D5: a Sitemap: line sandwiched between stacked User-agents must be IGNORED, keeping * blocked.
 const stacked = createServer((req, res) => {
   const b = `http://127.0.0.1:${stacked.address().port}`;
@@ -471,6 +497,9 @@ t('[e2e] unquoted name=viewport is not reported missing', !onPage('/minified-vie
 t('[e2e] a page with NO viewport meta IS reported missing', onPage('/no-viewport', /missing viewport/));
 t('[e2e] max-image-preview:none is NOT reported as noindex', !onPage('/img-preview', /is noindex/));
 t('[e2e] a bare alt attribute is not counted as missing alt', !onPage('/bare-alt', /without alt/));
+t('[e2e] a malformed rel=amphtml is reported, not crashed', onPage('/bad-amphtml', /amphtml is not a valid URL/));
+t('[e2e] the run still completes with a malformed amphtml (JSON written)', findings.length > 0);
+t('[e2e] a PDF sitemap URL is not scored as HTML (no false missing-title)', !onPage('/doc.pdf', /missing <title>|no <h1>|missing meta description/));
 // detectors the reviewer found untested. Positive polarity for each.
 t('[e2e] aggregateRating without a review count fires', onPage('/agg-bad', /aggregateRating without reviewCount/));
 t('[e2e] aggregateRating always raises a verify-it-is-real handoff', findings.some((f) => /aggregateRating present/.test(f.message) && f.class === 'handoff'));

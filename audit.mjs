@@ -163,7 +163,15 @@ async function auditRobots() {
   const groups = robotsGroups(body);
   const blocksAll = (agent) => (groups.get(agent.toLowerCase()) || []).some((l) => /^Disallow:\s*\/\s*$/i.test(l));
   if (blocksAll('*')) add('critical', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt blocks all crawlers (User-agent: * / Disallow: /)', 'robots/intro');
-  for (const b of AI_BOTS) { if (blocksAll(b)) add('medium', 'ai-search', 'handoff', '/robots.txt', `${b} is fully disallowed — that engine cannot cite this site`, 'robots/intro'); }
+  for (const b of AI_BOTS) {
+    if (!blocksAll(b)) continue;
+    // Google-Extended governs Gemini/Vertex model TRAINING, not Search or AI-Overviews citation --
+    // blocking it does not remove you from any answer surface, unlike the answer-engine crawlers.
+    const msg = b === 'Google-Extended'
+      ? 'Google-Extended is disallowed — this only blocks Gemini/Vertex model training, NOT Google Search or AI-Overviews citation'
+      : `${b} is fully disallowed — that engine cannot cite this site`;
+    add('medium', 'ai-search', 'handoff', '/robots.txt', msg, 'robots/intro');
+  }
   if (Buffer.byteLength(body, 'utf8') > 500 * 1024) add('medium', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt exceeds 500 KiB — "Google enforces a robots.txt file size limit of 500 kibibytes"', 'crawling/robots-txt/robots-txt-spec');
   const sitemaps = [...body.matchAll(/^\s*Sitemap:\s*(\S+)/gim)].map((m) => m[1]);
   if (!sitemaps.length) add('medium', 'sitemap', 'auto-fix', '/robots.txt', 'no Sitemap: directive in robots.txt', 'sitemaps/build-sitemap');
@@ -537,6 +545,10 @@ for (const u of pages) {
     add('medium', 'indexing', 'auto-fix', path, `sitemap URL redirects to ${finalUrl} — list the final URL`, 'crawling-indexing/301-redirects');
     continue;
   }
+  // A sitemap may legitimately list non-HTML URLs (PDFs, images). Don't score a PDF as an HTML
+  // page -- it has no <title>, so every on-page check would fire, including a false CRITICAL.
+  const ctype = headers.get?.('content-type') || '';
+  if (ctype && !/html|xml/i.test(ctype)) continue;
   // One malformed page must never abort the crawl. Report it and keep going -- a crash exits 1,
   // which is indistinguishable from "findings remain", so CI would read it as an ordinary red.
   try { rawViews.set(u, auditHtml(body, u, 'raw', headers)); }
@@ -557,7 +569,11 @@ for (const [target, srcs] of canonicalTargets) {
 for (const [u, v] of rawViews) {
   if (!v.amphtml) continue;
   // Resolve against the PAGE url, not the origin: href="amp" on /blog/post means /blog/amp.
-  const amp = new URL(v.amphtml, u).href;
+  // A malformed href (`http://`, `//`) throws even with a valid base -- guard it, or one bad
+  // amphtml link aborts the whole audit with no output.
+  let amp;
+  try { amp = new URL(v.amphtml, u).href; }
+  catch { add('high', 'amp', 'auto-fix', new URL(u).pathname, `rel=amphtml is not a valid URL ("${v.amphtml}")`, 'crawling-indexing/amp/validate-amp'); continue; }
   const r = await get(amp);
   const p = new URL(u).pathname;
   if (r.status !== 200) { add('high', 'amp', 'auto-fix', p, `rel=amphtml points at ${amp}, which returns ${r.status}`, 'crawling-indexing/amp/validate-amp'); continue; }
@@ -660,7 +676,10 @@ if (RENDER) {
       // wrong for three of the four. Don't demand an impossible fix — name the structural cause.
       // EVERY non-self alternate must be a query-variant of this same path. If even one alternate
       // lives at its own path (/fr/x), a static per-path canonical IS possible and should be baked.
-      const others = (raw.hreflang || []).filter((h) => h.lang.toLowerCase() !== 'x-default' && norm(new URL(h.href, u).href) !== norm(u));
+      const others = (raw.hreflang || []).filter((h) => {
+        if (h.lang.toLowerCase() === 'x-default') return false;
+        try { return norm(new URL(h.href, u).href) !== norm(u); } catch { return false; }
+      });
       const queryOnlyAlts = others.length > 0 && others.every((h) => {
         try { const a = new URL(h.href, u); const b = new URL(u); return a.pathname === b.pathname && a.search !== b.search; } catch { return false; }
       });
