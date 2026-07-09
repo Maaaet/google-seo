@@ -22,7 +22,10 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-let pass = 0, fail = 0;
+let pass = 0, fail = 0, skipped = 0;
+// A skip is NOT a pass. It prints, it is counted, and the summary shows it — an environment that
+// can't run a check must say so, not report green.
+const skip = (name, why) => { skipped++; console.log(`SKIP  ${name} — ${why}`); };
 const t = (name, cond) => { cond ? pass++ : fail++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}`); };
 
 // SELF-LINT: an assertion of the form `X || !Y` is the escape-clause shape that made four separate
@@ -559,6 +562,86 @@ t('[e2e] canonical as the LAST token of a multi-value rel is detected', fmtFindi
 t('[e2e] a 403 is a handoff (bot protection), not a critical de-index', fmtFindings.some((f) => /\/botblocked/.test(String(f.where)) && f.class === 'handoff') && !fmtFindings.some((f) => /\/botblocked/.test(String(f.where)) && f.severity === 'critical'));
 t('[e2e] a lone self-referential hreflang does not demand x-default', !fmtFindings.some((f) => /\/lone-hreflang/.test(String(f.where)) && /x-default/.test(f.message)));
 
+// IDENTITY vs EQUALITY. A page's own canonical/hreflang written with a different SCHEME or a `www.`
+// twin is the SAME page, and a RELATIVE href belongs to the page carrying it, not to the audit base.
+// gnu.org (sitemap lists http:// locs) produced 7 false HIGH "hreflang does not list itself" because
+// norm() resolved relative hrefs against the https base and then compared scheme-sensitively.
+// Each "no false HIGH" assertion is paired with a POSITIVE one proving the tag was parsed at all —
+// otherwise a parser that silently skipped the page would make these vacuously green.
+const idsrv = createServer((req, res) => {
+  const P = idsrv.address().port;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: http://localhost:${P}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') {
+    res.writeHead(200, { 'content-type': 'application/xml' });
+    return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+      `<url><loc>http://localhost:${P}/dir/x.html</loc></url><url><loc>http://localhost:${P}/dir/y.html</loc></url></urlset>`);
+  }
+  // canonical differs from the page URL only by SCHEME; hreflang "x.html" is relative to /dir/
+  if (u === '/dir/x.html') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Dir X', `<meta name="description" content="Scheme-twin canonical and a relative self hreflang.">` +
+      `<link rel="canonical" href="https://localhost:${P}/dir/x.html">` +
+      `<link rel="alternate" hreflang="en" href="x.html">` +
+      `<link rel="alternate" hreflang="fr" href="/dir/fr.html">`));
+  }
+  // canonical differs from the page URL only by the `www.` twin
+  if (u === '/dir/y.html') {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    return res.end(page('Dir Y', `<meta name="description" content="A www-twin canonical is the same page.">` +
+      `<link rel="canonical" href="http://www.localhost:${P}/dir/y.html">`));
+  }
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => idsrv.listen(0, 'localhost', r));
+const ID = `http://localhost:${idsrv.address().port}`;
+const OUTID = path.join(HERE, '.test-findings-id.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), ID, '--json', OUTID, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+idsrv.close();
+const idF = JSON.parse(readFileSync(OUTID, 'utf8')).findings; unlinkSync(OUTID);
+const at = (p, re) => idF.some((f) => String(f.where).includes(p) && re.test(f.message));
+
+t('[e2e] a canonical differing only by SCHEME is not "a different URL"', !at('/dir/x.html', /canonical points at a different URL/));
+t('[e2e]  ...and the scheme-twin canonical IS still reported as a form difference (proves it parsed)', at('/dir/x.html', /differ only in form/));
+t('[e2e] a canonical differing only by the www. twin is not "a different URL"', !at('/dir/y.html', /canonical points at a different URL/));
+t('[e2e]  ...and the www-twin canonical IS still reported as a form difference (proves it parsed)', at('/dir/y.html', /differ only in form/));
+t('[e2e] a RELATIVE hreflang href resolves against the page, not the audit base', !at('/dir/x.html', /does not list itself/));
+t('[e2e]  ...and that hreflang set WAS parsed (its missing x-default is reported)', at('/dir/x.html', /x-default/));
+
+// GUARD: redirect detection must stay scheme- and www-SENSITIVE. It is the one comparison that must
+// NOT use key(): a sitemap sending Google through http->https (or apex->www) is a real stale entry.
+// Collapsing norm() into key() would silently delete this finding, and the /stale-redirect fixture
+// above (a PATH redirect) would not notice. `www.localhost` resolves to loopback per RFC 6761, but
+// not on every resolver — probe first, and SKIP loudly rather than pass quietly.
+let wwwLoopback = false;
+{
+  const probe = createServer((q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('ok'); });
+  await new Promise((r) => probe.listen(0, 'localhost', r));
+  try { wwwLoopback = (await fetch(`http://www.localhost:${probe.address().port}/`)).status === 200; } catch { wwwLoopback = false; }
+  probe.close();
+}
+if (!wwwLoopback) skip('[e2e] a sitemap URL redirecting apex -> www is reported as stale', 'www.localhost does not resolve here');
+else {
+  const rd = createServer((req, res) => {
+    const P = rd.address().port;
+    const u = req.url.split('?')[0];
+    if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: http://localhost:${P}/sitemap.xml\n`); }
+    if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>http://localhost:${P}/wwwredir</loc></url></urlset>`); }
+    // apex -> www: same SITE (so it is crawled), different URL (so the sitemap entry is stale)
+    if (u === '/wwwredir' && !/^www\./.test(req.headers.host || '')) { res.writeHead(301, { location: `http://www.localhost:${P}/wwwredir` }); return res.end(); }
+    if (u === '/wwwredir') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('WWW redirect target', `<meta name="description" content="Reached only after the apex to www redirect.">`)); }
+    res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+  });
+  await new Promise((r) => rd.listen(0, 'localhost', r));
+  const RD = `http://localhost:${rd.address().port}`;
+  const OUTRD = path.join(HERE, '.test-findings-rd.json');
+  await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), RD, '--json', OUTRD, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+  rd.close();
+  const rdF = JSON.parse(readFileSync(OUTRD, 'utf8')).findings; unlinkSync(OUTRD);
+  t('[e2e] a sitemap URL redirecting apex -> www is reported as stale', rdF.some((f) => /redirects to/.test(f.message) && /www\.localhost/.test(f.message)));
+  t('[e2e]  ...and it is NOT also called another host (www is the same site)', !rdF.some((f) => /another host/.test(f.message)));
+}
+
 // --render when EVERY sitemap URL redirects: must not spawn Chrome, must not hang, must say so.
 const allRedir = createServer((req, res) => {
   const b = `http://127.0.0.1:${allRedir.address().port}`;
@@ -613,5 +696,5 @@ t('[e2e] a spec-escaped self-canonical hub is not its own victim (no false CRITI
 const chainMsg = findings.find((f) => /Chained Shared Title/.test(f.message))?.message ?? '';
 t('[e2e] an hreflang chain counts as ONE page, so the message says 2 distinct pages', /^2 distinct pages share one <title>/.test(chainMsg));
 
-console.log(`\n${pass} passed, ${fail} failed`);
+console.log(`\n${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`);
 process.exit(fail ? 1 : 0);

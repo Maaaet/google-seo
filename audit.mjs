@@ -73,6 +73,8 @@ const HOST = (() => { try { return bareHost(new URL(base).hostname); } catch { r
 const sameSite = (u) => { try { return bareHost(new URL(u).hostname) === HOST; } catch { return false; } };
 // Strip a trailing slash from the PATH only. Operating on the full href would eat the slash inside
 // a query value (`?path=/a/b/`), collapsing two genuinely distinct URLs into one.
+// norm() keeps the scheme and the full host: it exists for REDIRECT detection, where http -> https
+// (or apex -> www) is a real redirect that a sitemap should not be sending Google through.
 const norm = (u) => {
   try {
     const x = new URL(u, origin);
@@ -80,7 +82,20 @@ const norm = (u) => {
     return x.origin + path + x.search;
   } catch { return u; }
 };
+// IDENTITY, not equality. "Is this href the same PAGE as that one?" — scheme- and `www.`-insensitive,
+// exactly like sameSite(), and relative hrefs resolve against `ctx` (the page carrying them), NOT the
+// audit base. Both halves were bugs: crawling gnu.org (its sitemap lists http:// locs) resolved every
+// relative hreflang against the https base and then compared scheme-sensitively, so 7 pages that do
+// self-list were reported as "hreflang does not list itself". Never use this for redirect detection.
+const key = (u, ctx = origin) => {
+  try {
+    const x = new URL(u, ctx);
+    const path = x.pathname === '/' ? '/' : x.pathname.replace(/\/$/, '');
+    return bareHost(x.hostname) + (x.port ? `:${x.port}` : '') + path + x.search;
+  } catch { return String(u); }
+};
 
+function shortPath(u) { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const { gunzipSync } = await import('node:zlib');
 async function get(url, tries = 2) {
@@ -365,8 +380,10 @@ async function auditSitemap(smUrls) {
 
 // ---- per page ---------------------------------------------------------------------------------
 const seenTitle = new Map(), seenDesc = new Map(), canonicalTargets = new Map();
+const canonicalDisplay = new Map();   // identity key -> the canonical URL as authored, for messages
 const crossHosts = new Set();      // foreign hosts already reported (one finding each, not per-loc)
-const hreflangGraph = new Map();   // url -> Set(alternate urls it declares)
+const hreflangGraph = new Map();   // identity key -> Set(identity keys it declares as alternates)
+const keyUrl = new Map();          // identity key -> the URL we actually crawled, for messages
 const sitemapAlts = new Map();     // url -> [{lang, href}] declared via <xhtml:link> in the sitemap
 
 function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
@@ -401,13 +418,14 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
       // decoded too. Comparing decoded-canonical against raw-loc reported `?b=1&amp;c=2` as pointing
       // somewhere else than `?b=1&c=2` -- a false finding on a perfectly correct site.
       const durl = decodeEnts(url);
-      const t = norm(canonical);
+      const t = key(canonical, durl);
       canonicalTargets.set(t, [...(canonicalTargets.get(t) || []), path]);
-      if (t !== norm(durl)) add('high', 'canonical', 'auto-fix', path, `canonical points at a different URL: ${canonical}`, 'consolidate-duplicate-urls');
+      if (!canonicalDisplay.has(t)) canonicalDisplay.set(t, canonical);
+      if (t !== key(durl)) add('high', 'canonical', 'auto-fix', path, `canonical points at a different URL: ${canonical}`, 'consolidate-duplicate-urls');
       // BYTE-match, not normalized match. norm() deliberately collapses trailing slashes, so a
       // sitemap listing /foo/ while the page canonicalizes to /foo would otherwise slip through --
       // and "don't specify one URL in a sitemap, but a different URL ... using rel=canonical".
-      else if (canonical !== durl) add('low', 'sitemap', 'auto-fix', path, `sitemap <loc> "${url}" and canonical "${canonical}" differ only in form (slash/scheme/case). List the canonical verbatim.`, 'sitemaps/build-sitemap');
+      else if (canonical !== durl) add('low', 'sitemap', 'auto-fix', path, `sitemap <loc> "${url}" and canonical "${canonical}" differ only in form (slash/scheme/case/www). List the canonical verbatim.`, 'sitemaps/build-sitemap');
     }
   } else if (view === 'raw') {
     // Not automatically a defect: "If you can't set the canonical URL in the HTML source code,
@@ -434,13 +452,14 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   if (!out.hreflang.length && sitemapAlts.has(url)) { out.hreflang = sitemapAlts.get(url); out.hreflangFromSitemap = true; }
   if (out.hreflang.length) {
     const via = out.hreflangFromSitemap ? ' (delivered via sitemap)' : '';
-    const selfListed = out.hreflang.some((h) => norm(h.href) === norm(url));
+    const selfListed = out.hreflang.some((h) => key(h.href, url) === key(url));
     if (!selfListed) add('high', 'international', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}hreflang set${via} does not list itself — "Each language version must list itself as well as all other language versions"`, 'specialty/international/localized-versions');
     // Only meaningful with real alternates: a lone self-referential hreflang needs no x-default.
-    const realAlts = out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default' && norm(h.href) !== norm(url));
+    const realAlts = out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default' && key(h.href, url) !== key(url));
     if (realAlts.length && !out.hreflang.some((h) => h.lang.toLowerCase() === 'x-default')) add('low', 'international', 'auto-fix', path, `${tag}no x-default hreflang${via}`, 'specialty/international/localized-versions');
     // reciprocity is a CROSS-page property; record the graph and check it after the crawl
-    if (view === 'raw') hreflangGraph.set(norm(url), new Set(out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default').map((h) => norm(h.href))));
+    if (view === 'raw') keyUrl.set(key(url), url);
+    if (view === 'raw') hreflangGraph.set(key(url), new Set(out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default').map((h) => key(h.href, url))));
   }
 
   // structured data. Rendered view only re-checks when raw carried NO JSON-LD at all, otherwise
@@ -487,7 +506,7 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     // conflict source when it disagrees with the HTML tag.
     const linkHdr = headers?.get?.('link') || '';
     const hdrCanon = linkHdr.match(/<([^>]+)>\s*;\s*rel=["']?canonical/i)?.[1];
-    if (hdrCanon && canonical && norm(hdrCanon) !== norm(canonical)) {
+    if (hdrCanon && canonical && key(hdrCanon, url) !== key(canonical, url)) {
       add('high', 'canonical', 'auto-fix', path, `Link: rel=canonical header (${hdrCanon}) disagrees with the HTML canonical (${canonical})`, 'consolidate-duplicate-urls');
     }
 
@@ -641,8 +660,8 @@ for (const [target, srcs] of canonicalTargets) {
   // `target` came from linkHref (entities decoded); `p` is the raw sitemap path, where XML mandates
   // `&amp;`. Compare decoded-to-decoded or a self-canonical hub counts as its own victim -- a false
   // CRITICAL on any URL with two query params.
-  const others = srcs.filter((p) => norm(decodeEnts(origin + p)) !== target);
-  if (others.length >= 3) add('critical', 'canonical', 'auto-fix', target, `${others.length} distinct pages declare canonical -> ${target}. rel=canonical is "A strong signal"; this de-indexes them into one page.`, 'consolidate-duplicate-urls');
+  const others = srcs.filter((p) => key(decodeEnts(origin + p)) !== target);
+  if (others.length >= 3) add('critical', 'canonical', 'auto-fix', canonicalDisplay.get(target) || target, `${others.length} distinct pages declare canonical -> ${canonicalDisplay.get(target) || target}. rel=canonical is "A strong signal"; this de-indexes them into one page.`, 'consolidate-duplicate-urls');
 }
 
 // AMP pairing: "Google Search requires that an AMP page links to a canonical page." Fetch each
@@ -660,18 +679,21 @@ for (const [u, v] of rawViews) {
   if (r.status !== 200) { add('high', 'amp', 'auto-fix', p, `rel=amphtml points at ${amp}, which returns ${r.status}`, 'crawling-indexing/amp/validate-amp'); continue; }
   const back = linkHref(clean(r.body), 'canonical');
   if (!back) add('high', 'amp', 'auto-fix', amp, 'AMP page has no rel=canonical back to the HTML page', 'crawling-indexing/amp/enhance-amp');
-  else if (norm(back) !== norm(u)) add('high', 'amp', 'auto-fix', amp, `AMP page canonicalizes to ${back}, not to its HTML page ${u}`, 'crawling-indexing/amp/validate-amp');
+  else if (key(back, amp) !== key(u)) add('high', 'amp', 'auto-fix', amp, `AMP page canonicalizes to ${back}, not to its HTML page ${u}`, 'crawling-indexing/amp/validate-amp');
 }
 
 // cross-page: hreflang reciprocity. "If two pages don't both point to each other, the tags will be
 // ignored." Only assert on pages we actually fetched — a missing return link from an unfetched page
 // is unknown, not broken.
-for (const [u, alts] of hreflangGraph) {
+for (const [k, alts] of hreflangGraph) {
+  // `k` is an identity key (host+path), not a URL — recover the URL we crawled for the message.
+  const u = keyUrl.get(k) || k;
   for (const alt of alts) {
-    if (alt === u || !hreflangGraph.has(alt)) continue;
-    if (!hreflangGraph.get(alt).has(u)) {
-      add('high', 'international', 'auto-fix', new URL(u).pathname + new URL(u).search,
-        `hreflang is not reciprocal: this page points to ${alt}, which does not point back. "If two pages don't both point to each other, the tags will be ignored."`,
+    if (alt === k || !hreflangGraph.has(alt)) continue;
+    if (!hreflangGraph.get(alt).has(k)) {
+      const altUrl = keyUrl.get(alt) || alt;
+      add('high', 'international', 'auto-fix', shortPath(u),
+        `hreflang is not reciprocal: this page points to ${altUrl}, which does not point back. "If two pages don't both point to each other, the tags will be ignored."`,
         'specialty/international/localized-versions');
     }
   }
@@ -682,8 +704,7 @@ for (const [u, alts] of hreflangGraph) {
 // HTML legitimately matches when a single static document answers every language variant; the real
 // defect there is "title differs raw vs rendered", already reported. Counting them as duplicate
 // titles buries the actual finding under one entry per property.
-const areAlternates = (a, b) => hreflangGraph.get(norm(a))?.has(norm(b)) || hreflangGraph.get(norm(b))?.has(norm(a));
-const shortPath = (u) => { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } };
+const areAlternates = (a, b) => hreflangGraph.get(key(a))?.has(key(b)) || hreflangGraph.get(key(b))?.has(key(a));
 
 // Count CONNECTED COMPONENTS of the alternate relation, not a greedy first-fit over
 // representatives. With hub-and-spoke hreflang (A~B, B~C, A!~C) greedy first-fit reports a
@@ -759,7 +780,7 @@ if (RENDER) {
       // lives at its own path (/fr/x), a static per-path canonical IS possible and should be baked.
       const others = (raw.hreflang || []).filter((h) => {
         if (h.lang.toLowerCase() === 'x-default') return false;
-        try { return norm(new URL(h.href, u).href) !== norm(u); } catch { return false; }
+        try { return key(h.href, u) !== key(u); } catch { return false; }
       });
       const queryOnlyAlts = others.length > 0 && others.every((h) => {
         try { const a = new URL(h.href, u); const b = new URL(u); return a.pathname === b.pathname && a.search !== b.search; } catch { return false; }
