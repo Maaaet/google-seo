@@ -119,7 +119,7 @@ async function auditRobots() {
   const blocksAll = (agent) => (groups.get(agent.toLowerCase()) || []).some((l) => /^Disallow:\s*\/\s*$/i.test(l));
   if (blocksAll('*')) add('critical', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt blocks all crawlers (User-agent: * / Disallow: /)', 'robots/intro');
   for (const b of AI_BOTS) { if (blocksAll(b)) add('medium', 'ai-search', 'handoff', '/robots.txt', `${b} is fully disallowed — that engine cannot cite this site`, 'robots/intro'); }
-  if (Buffer.byteLength(body, 'utf8') > 500 * 1024) add('medium', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt exceeds 500 KiB — Google ignores content past the cap', 'robots/intro');
+  if (Buffer.byteLength(body, 'utf8') > 500 * 1024) add('medium', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt exceeds 500 KiB — "Google enforces a robots.txt file size limit of 500 kibibytes"', 'crawling/robots-txt/robots-txt-spec');
   const sitemaps = [...body.matchAll(/^\s*Sitemap:\s*(\S+)/gim)].map((m) => m[1]);
   if (!sitemaps.length) add('medium', 'sitemap', 'auto-fix', '/robots.txt', 'no Sitemap: directive in robots.txt', 'sitemaps/build-sitemap');
   const disallows = [...body.matchAll(/^\s*Disallow:\s*(\S+)/gim)].map((m) => m[1]).filter((p) => p && p !== '/');
@@ -145,6 +145,19 @@ function auditOneSitemap(url, body, headers, { isIndex }) {
 
   const bytes = Buffer.byteLength(body, 'utf8');
   if (bytes > MAX_BYTES) add('critical', 'sitemap', 'auto-fix', url, `${(bytes / 1048576).toFixed(1)}MB (limit 50MB uncompressed)`, 'sitemaps/large-sitemaps');
+
+  // hreflang may be delivered in the sitemap ("There are three ways ...: HTML, HTTP Headers,
+  // Sitemap"). Harvest it so cross-page reciprocity and language-cluster logic see it.
+  if (!isIndex) {
+    for (const m of body.matchAll(/<url>([\s\S]*?)<\/url>/gi)) {
+      const loc = m[1].match(/<loc>([^<]+)<\/loc>/i)?.[1]?.trim();
+      if (!loc) continue;
+      const alts = [...m[1].matchAll(/<xhtml:link[^>]*rel=["']alternate["'][^>]*>/gi)]
+        .map((x) => ({ lang: x[0].match(/hreflang=["']([^"']+)["']/i)?.[1], href: x[0].match(/href=["']([^"']+)["']/i)?.[1] }))
+        .filter((x) => x.lang && x.href);
+      if (alts.length) sitemapAlts.set(loc, alts);
+    }
+  }
 
   const locs = [...body.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m) => m[1].trim());
   if (locs.length > MAX_URLS) {
@@ -220,6 +233,7 @@ async function auditSitemap(smUrls) {
 // ---- per page ---------------------------------------------------------------------------------
 const seenTitle = new Map(), seenDesc = new Map(), canonicalTargets = new Map();
 const hreflangGraph = new Map();   // url -> Set(alternate urls it declares)
+const sitemapAlts = new Map();     // url -> [{lang, href}] declared via <xhtml:link> in the sitemap
 
 function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   const html = decomment(rawHtml);
@@ -232,12 +246,12 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   if (!title) add('critical', 'on-page', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}missing <title>`, 'appearance/title-link');
   // Duplicate title/description are collected, not reported per-page: N pages sharing one title is
   // ONE defect (usually an unrendered SPA shell), and emitting it N times buries everything else.
-  else if (view === 'raw') seenTitle.set(path, title);
+  else if (view === 'raw') seenTitle.set(url, title);
 
   const desc = metaC(html, 'name', 'description');
   out.desc = desc;
   if (!desc) add('high', 'on-page', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}missing meta description`, 'appearance/snippet');
-  else if (view === 'raw') seenDesc.set(path, desc);
+  else if (view === 'raw') seenDesc.set(url, desc);
 
   // canonical — "A strong signal that the specified URL should become canonical"
   const canons = allCanonicals(html);
@@ -272,11 +286,15 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     add('critical', 'indexing', 'handoff', path, `${tag}page is noindex ("${robots || xrobots}") — a human must confirm this is intentional`, 'crawling-indexing/block-indexing');
   }
 
+  // HTML head first; otherwise the sitemap's annotations for this exact URL.
   out.hreflang = hreflangs(html);
+  out.hreflangFromSitemap = false;
+  if (!out.hreflang.length && sitemapAlts.has(url)) { out.hreflang = sitemapAlts.get(url); out.hreflangFromSitemap = true; }
   if (out.hreflang.length) {
+    const via = out.hreflangFromSitemap ? ' (delivered via sitemap)' : '';
     const selfListed = out.hreflang.some((h) => norm(h.href) === norm(url));
-    if (!selfListed) add('high', 'international', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}hreflang set does not list itself — "Each language version must list itself as well as all other language versions"`, 'specialty/international/localized-versions');
-    if (!out.hreflang.some((h) => h.lang.toLowerCase() === 'x-default')) add('low', 'international', 'auto-fix', path, `${tag}no x-default hreflang`, 'specialty/international/localized-versions');
+    if (!selfListed) add('high', 'international', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}hreflang set${via} does not list itself — "Each language version must list itself as well as all other language versions"`, 'specialty/international/localized-versions');
+    if (!out.hreflang.some((h) => h.lang.toLowerCase() === 'x-default')) add('low', 'international', 'auto-fix', path, `${tag}no x-default hreflang${via}`, 'specialty/international/localized-versions');
     // reciprocity is a CROSS-page property; record the graph and check it after the crawl
     if (view === 'raw') hreflangGraph.set(norm(url), new Set(out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default').map((h) => norm(h.href))));
   }
@@ -301,10 +319,15 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   out.jsonLdTypes = jsonLdBlocks(html).flatMap((b) => { try { const d = JSON.parse(b); return (Array.isArray(d) ? d : d['@graph'] || [d]).map((x) => x['@type']); } catch { return []; } });
 
   if (view === 'raw') {
-    if (!/<meta[^>]*name=["']viewport["']/i.test(html)) add('medium', 'page-experience', 'auto-fix', path, 'missing viewport meta (mobile-first indexing)', 'mobile/mobile-sites-mobile-first-indexing');
+    if (!/<meta[^>]*name=["']viewport["']/i.test(html)) add('medium', 'page-experience', 'auto-fix', path, 'missing viewport meta — "Presence of this tag indicates to Google that the page is mobile friendly"', 'crawling-indexing/special-tags');
     if (!/<html[^>]*\blang=/i.test(html)) add('low', 'international', 'auto-fix', path, 'missing <html lang>', 'specialty/international/localized-versions');
     const h1 = tagText(html, 'h1');
-    if (!h1.length) out.noRawH1 = true;
+    if (!h1.length) {
+      out.noRawH1 = true;
+      // Without --render we cannot distinguish "no h1 anywhere" from "h1 added by JS". Say which,
+      // rather than flagging every page of a client-rendered site as broken.
+      if (!RENDER) add('low', 'on-page', 'handoff', path, 'no <h1> in the raw HTML. If this page is client-rendered the heading may be added by JS — re-run with --render to tell the difference.', 'appearance/title-link');
+    } else if (h1.length > 1) add('low', 'on-page', 'auto-fix', path, `${h1.length} <h1> elements on one page`, 'appearance/title-link');
     const imgs = [...html.matchAll(/<img\b[^>]*>/gi)].map((m) => m[0]);
     const noAlt = imgs.filter((t) => !/\balt=/i.test(t)).length;
     if (noAlt) add('low', 'on-page', 'auto-fix', path, `${noAlt}/${imgs.length} <img> without alt`, 'appearance/google-images');
@@ -466,12 +489,24 @@ for (const [u, alts] of hreflangGraph) {
 }
 
 // cross-page: duplicate <title>/<description> reported once per shared value, listing victims.
+// Two URLs that declare each other as hreflang alternates are ONE page in two languages. Their raw
+// HTML legitimately matches when a single static document answers every language variant; the real
+// defect there is "title differs raw vs rendered", already reported. Counting them as duplicate
+// titles buries the actual finding under one entry per property.
+const areAlternates = (a, b) => hreflangGraph.get(norm(a))?.has(norm(b)) || hreflangGraph.get(norm(b))?.has(norm(a));
+const shortPath = (u) => { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } };
+
 for (const [label, map, sev, doc] of [['<title>', seenTitle, 'high', 'appearance/title-link'], ['meta description', seenDesc, 'medium', 'appearance/snippet']]) {
   const byValue = new Map();
-  for (const [p, v] of map) byValue.set(v, [...(byValue.get(v) || []), p]);
-  for (const [v, paths] of byValue) {
-    if (paths.length < 2) continue;
-    add(sev, 'on-page', 'auto-fix', paths[0], `${paths.length} pages share one ${label} ("${v.slice(0, 50)}…") — e.g. ${paths.slice(0, 4).join(', ')}${paths.length > 4 ? ` +${paths.length - 4} more` : ''}. If these are client-rendered, the raw HTML is an unrendered shell.`, doc);
+  for (const [u, v] of map) byValue.set(v, [...(byValue.get(v) || []), u]);
+  for (const [v, urls] of byValue) {
+    if (urls.length < 2) continue;
+    // collapse each hreflang cluster to a single representative
+    const reps = [];
+    for (const u of urls) if (!reps.some((r) => areAlternates(r, u))) reps.push(u);
+    if (reps.length < 2) continue;   // one page, N languages — not a duplicate
+    const paths = reps.map(shortPath);
+    add(sev, 'on-page', 'auto-fix', paths[0], `${paths.length} distinct pages share one ${label} ("${v.slice(0, 50)}…") — e.g. ${paths.slice(0, 4).join(', ')}${paths.length > 4 ? ` +${paths.length - 4} more` : ''}. If these are client-rendered, the raw HTML is an unrendered shell.`, doc);
   }
 }
 
@@ -494,10 +529,22 @@ if (RENDER) {
     const raw = rawViews.get(u) || {};
     const path = new URL(u).pathname + new URL(u).search; // ?lang= variants are distinct URLs
     if (raw.title && rv.title && raw.title !== rv.title) add('high', 'javascript', 'auto-fix', path, `<title> differs raw vs rendered — non-rendering crawlers (most AI engines) see "${raw.title.slice(0, 50)}", Google-after-render sees "${rv.title.slice(0, 50)}". Prerender or SSR the head.`, 'javascript/dynamic-rendering');
-    if (raw.noRawCanonical && rv.canonical) add('medium', 'canonical', 'auto-fix', path, `canonical exists only after JS runs. Google honors it at render time but "we don't recommend using JavaScript for this" — bake it into the HTML source.`, 'javascript/javascript-seo-basics');
+    if (raw.noRawCanonical && rv.canonical) {
+      // If this URL's hreflang alternates differ from it ONLY by query string, then one static
+      // document is serving every language variant and a baked-in canonical would necessarily be
+      // wrong for three of the four. Don't demand an impossible fix — name the structural cause.
+      const queryOnlyAlts = (raw.hreflang || []).some((h) => {
+        try { const a = new URL(h.href, origin); const b = new URL(u); return a.pathname === b.pathname && a.search !== b.search; } catch { return false; }
+      });
+      if (queryOnlyAlts) add('medium', 'international', 'handoff', path, `canonical can only be set by JS here: one document answers several ?param language URLs, so no single baked canonical is correct for all of them. Google marks URL-parameter locales "Not recommended" — move to /xx/ subdirectories (or ccTLD/subdomain) and the canonical can be static.`, 'specialty/international/managing-multi-regional-sites');
+      else add('medium', 'canonical', 'auto-fix', path, `canonical exists only after JS runs. Google honors it at render time but "we don't recommend using JavaScript for this" — bake it into the HTML source.`, 'javascript/javascript-seo-basics');
+    }
     if (!raw.jsonLdTypes?.length && rv.jsonLdTypes?.length) add('high', 'structured-data', 'auto-fix', path, `structured data (${rv.jsonLdTypes.join(', ')}) exists only after JS runs — AI crawlers and social scrapers never see it`, 'structured-data/generate-structured-data-with-javascript');
-    if (!raw.hreflang?.length && rv.hreflang?.length) add('high', 'international', 'auto-fix', path, `hreflang exists only after JS runs. Google sanctions only HTML head / HTTP header / sitemap delivery.`, 'specialty/international/localized-versions');
-    if (raw.noRawH1 && tagText(html, 'h1').length) add('medium', 'on-page', 'auto-fix', path, `<h1> only exists after JS runs`, 'javascript/javascript-seo-basics');
+    if (!raw.hreflang?.length && rv.hreflang?.length) add('high', 'international', 'auto-fix', path, `hreflang exists only after JS runs, and the sitemap does not carry it either. Google sanctions only HTML head / HTTP header / sitemap delivery.`, 'specialty/international/localized-versions');
+    if (raw.noRawH1) {
+      if (tagText(decomment(html), 'h1').length) add('medium', 'on-page', 'auto-fix', path, '<h1> only exists after JS runs', 'javascript/javascript-seo-basics');
+      else add('medium', 'on-page', 'auto-fix', path, 'no <h1> on the page at all, rendered or raw', 'appearance/title-link');
+    }
   }
 }
 

@@ -85,9 +85,14 @@ de-indexes an entire site.
 **Indexing** — `noindex` in meta *or* `X-Robots-Tag`; sitemap URLs that 404 or redirect.
 
 **On-page** — missing/duplicate `<title>` and meta description (grouped by shared value, so one
-template bug is one finding, not two hundred); missing `<h1>`; images without `alt`; viewport.
+template bug is one finding, not two hundred); missing or multiple `<h1>`; images without `alt`;
+viewport; dead `meta keywords`; `rel=next/prev`.
 
-**International** — hreflang self-reference and `x-default`; `<html lang>`.
+**International** — hreflang self-reference, `x-default`, and **reciprocity across pages** (Google:
+"If two pages don't both point to each other, the tags will be ignored"); `<html lang>`.
+
+**Lifecycle** — AMP `rel=amphtml` ↔ `rel=canonical` pairing; paginated pages that canonicalize to
+page 1; `Link: rel=canonical` HTTP header conflicting with the HTML tag.
 
 **Structured data** — JSON-LD parses; `aggregateRating` without a review count; and it always flags
 ratings for human verification, because fabricating them is a manual-action offense. It does **not**
@@ -106,10 +111,10 @@ Core Web Vitals field data, manual actions, backlink quality, whether your conte
 helpful, and whether a rating you marked up is real. These are `handoff` findings. A tool that
 claimed to pass them would be lying to you.
 
-It also does not yet implement every check the reference sheets identify as mechanically auditable
-(AMP `rel=amphtml` pairing, per-type structured-data validation, pagination canonicals, sitemap
-extension limits, and others). The sheets say *auditable*, not *audited*. `COVERAGE.md` and each
-sheet's own `## Auditable checks` section are the honest list.
+It also does not yet implement every check the reference sheets identify as mechanically auditable —
+per-type structured-data validation, sitemap image/video/news extension limits, path-based pagination
+(`/page/2/`), A/B-test redirect types, and paused-site status codes, among others. The sheets say
+*auditable*, not *audited*; each sheet's own `## Auditable checks` section is the honest list.
 
 ## The rules, in short
 
