@@ -42,7 +42,7 @@ for p in missing:
 # Pages we deliberately don't summarize, with the reason. Kept explicit so "not summarized" never
 # gets read as "overlooked".
 DELIBERATE = {
-    "docs/search/docs/guides/javascript-seo-basics.md": "byte-duplicate of crawling-indexing/javascript/javascript-seo-basics.md",
+    "docs/search/docs/guides/javascript-seo-basics.md": "content-duplicate of crawling-indexing/javascript/javascript-seo-basics.md (bodies identical; only the source: frontmatter differs)",
     "docs/search/docs/appearance/visual-elements-gallery.md": "glossary of SERP visual elements; nothing to enforce",
     "docs/search/docs/monitor-debug/search-operators/image-search.md": "Google Images operators; debugging aid, no site requirement",
     "docs/search/docs/fundamentals/get-on-google.md": "navigational hub",

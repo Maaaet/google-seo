@@ -70,12 +70,17 @@ const tagText = (h, t) => [...h.matchAll(new RegExp(`<${t}\\b[^>]*>([\\s\\S]*?)<
 // missing description, or grouped every contraction-sharing page as a "duplicate".
 const ATTR = (name) => `${name}=(["'])((?:(?!\\1).)*)\\1`;
 // HTML5 allows unquoted attribute values for space-free content; without this fallback a valid
-// `content=Something` reads as an empty description and gets reported "missing".
-const UNQ = (name) => `${name}=([^\\s"'>]+)`;
-const metaC = (h, attr, key) => h.match(new RegExp(`<meta[^>]*${attr}=["']${key}["'][^>]*${ATTR('content')}`, 'i'))?.[2]
-  ?? h.match(new RegExp(`<meta[^>]*${ATTR('content')}[^>]*${attr}=["']${key}["']`, 'i'))?.[2]
-  ?? h.match(new RegExp(`<meta[^>]*${attr}=["']${key}["'][^>]*${UNQ('content')}`, 'i'))?.[1]
-  ?? h.match(new RegExp(`<meta[^>]*${UNQ('content')}[^>]*${attr}=["']${key}["']`, 'i'))?.[1] ?? '';
+// `content=Something` reads as an empty description. The leading \s is load-bearing: without it,
+// `<meta name="robots" data-note="content=noindex">` matched INSIDE the data-note value and
+// reported a false CRITICAL noindex. An attribute always starts after whitespace.
+const UNQ = (name) => `\\s${name}=([^\\s"'>]+)`;
+// The KEY attribute may itself be unquoted (`<meta name=description content=X>`), so match the
+// name with optional quotes and a trailing delimiter.
+const KEY = (attr, key) => `${attr}=["']?${key}(?=["'\\s>])`;
+const metaC = (h, attr, key) => h.match(new RegExp(`<meta[^>]*${KEY(attr, key)}[^>]*${ATTR('content')}`, 'i'))?.[2]
+  ?? h.match(new RegExp(`<meta[^>]*${ATTR('content')}[^>]*${KEY(attr, key)}`, 'i'))?.[2]
+  ?? h.match(new RegExp(`<meta[^>]*${KEY(attr, key)}[^>]*${UNQ('content')}`, 'i'))?.[1]
+  ?? h.match(new RegExp(`<meta[^>]*${UNQ('content')}[^>]*${KEY(attr, key)}`, 'i'))?.[1] ?? '';
 const linkHref = (h, rel) => h.match(new RegExp(`<link[^>]*rel=["']${rel}["'][^>]*${ATTR('href')}`, 'i'))?.[2]
   ?? h.match(new RegExp(`<link[^>]*${ATTR('href')}[^>]*rel=["']${rel}["']`, 'i'))?.[2] ?? '';
 const allCanonicals = (h) => [...h.matchAll(/<link[^>]*rel=["']canonical["'][^>]*>/gi)].map((m) => m[0]);
@@ -144,7 +149,7 @@ function auditOneSitemap(url, body, headers, { isIndex }) {
   if (declEnc && !/^utf-?8$/i.test(declEnc)) add('high', 'sitemap', 'auto-fix', url, `declares encoding="${declEnc}" — "The sitemap file must be UTF-8 encoded"`, 'sitemaps/build-sitemap');
 
   const bytes = Buffer.byteLength(body, 'utf8');
-  if (bytes > MAX_BYTES) add('critical', 'sitemap', 'auto-fix', url, `${(bytes / 1048576).toFixed(1)}MB (limit 50MB uncompressed)`, 'sitemaps/large-sitemaps');
+  if (bytes > MAX_BYTES) add('critical', 'sitemap', 'auto-fix', url, `${(bytes / 1048576).toFixed(1)}MB — "All formats limit a single sitemap to 50MB (uncompressed) or 50,000 URLs"`, 'sitemaps/build-sitemap');
 
   // hreflang may be delivered in the sitemap ("There are three ways ...: HTML, HTTP Headers,
   // Sitemap"). Harvest it so cross-page reciprocity and language-cluster logic see it.
@@ -162,7 +167,8 @@ function auditOneSitemap(url, body, headers, { isIndex }) {
   const locs = [...body.matchAll(/<loc>([^<]+)<\/loc>/gi)].map((m) => m[1].trim());
   if (locs.length > MAX_URLS) {
     add('critical', 'sitemap', 'auto-fix', url,
-      `${locs.length} ${isIndex ? 'child sitemaps' : 'URLs'} in one file (limit 50,000)`, 'sitemaps/large-sitemaps');
+      `${locs.length} ${isIndex ? 'child sitemaps' : 'URLs'} in one file (limit 50,000)`,
+      isIndex ? 'sitemaps/large-sitemaps' : 'sitemaps/build-sitemap');
   }
   if (/<priority>/i.test(body)) add('low', 'sitemap', 'auto-fix', url, '<priority> present — "Google ignores <priority> and <changefreq> values"', 'sitemaps/build-sitemap');
   if (/<changefreq>/i.test(body)) add('low', 'sitemap', 'auto-fix', url, '<changefreq> present — Google ignores it', 'sitemaps/build-sitemap');
@@ -201,7 +207,7 @@ async function auditSitemapTree(url) {
 
   // Index: every child gets the full per-file treatment. No silent truncation.
   const all = [];
-  for (const child of top) {
+  for (const child of new Set(top)) {
     const r = await get(child);
     if (r.status !== 200) { add('high', 'sitemap', 'auto-fix', child, `child sitemap not 200 (got ${r.status})`, 'sitemaps/large-sitemaps'); continue; }
     const childIsIndex = /<sitemapindex/i.test(r.body);
@@ -224,7 +230,9 @@ async function auditSitemapTree(url) {
 // robots.txt may list SEVERAL sibling Sitemap: directives (pages / news / images). Auditing only
 // the first silently drops every page in the rest.
 async function auditSitemap(smUrls) {
-  const list = smUrls.length ? smUrls : [origin + '/sitemap.xml'];
+  // Dedup: two identical `Sitemap:` lines would otherwise fetch the same file twice and emit every
+  // sitemap-level finding twice.
+  const list = [...new Set(smUrls.length ? smUrls : [origin + '/sitemap.xml'])];
   const all = [];
   for (const sm of list) all.push(...await auditSitemapTree(sm));
   return [...new Set(all)];
@@ -301,7 +309,7 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
 
   // structured data. Rendered view only re-checks when raw carried NO JSON-LD at all, otherwise
   // every block is reported twice.
-  const skipSd = view === 'rendered' && (rawViews.get(url)?.jsonLdTypes?.length ?? 0) > 0;
+  const skipSd = view === 'rendered' && (rawViews.get(url)?.jsonLdBlockCount ?? 0) > 0;
   for (const blk of (skipSd ? [] : jsonLdBlocks(html))) {
     try {
       const data = JSON.parse(blk);
@@ -316,18 +324,20 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
       }
     } catch { add('high', 'structured-data', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}JSON-LD block does not parse`, 'structured-data/intro-structured-data'); }
   }
+  out.jsonLdBlockCount = jsonLdBlocks(html).length;   // an INVALID block still counts as present
   out.jsonLdTypes = jsonLdBlocks(html).flatMap((b) => { try { const d = JSON.parse(b); return (Array.isArray(d) ? d : d['@graph'] || [d]).map((x) => x['@type']); } catch { return []; } });
 
   if (view === 'raw') {
     if (!/<meta[^>]*name=["']viewport["']/i.test(html)) add('medium', 'page-experience', 'auto-fix', path, 'missing viewport meta — "Presence of this tag indicates to Google that the page is mobile friendly"', 'crawling-indexing/special-tags');
     if (!/<html[^>]*\blang=/i.test(html)) add('low', 'international', 'auto-fix', path, 'missing <html lang>', 'specialty/international/localized-versions');
     const h1 = tagText(html, 'h1');
-    if (!h1.length) {
-      out.noRawH1 = true;
-      // Without --render we cannot distinguish "no h1 anywhere" from "h1 added by JS". Say which,
-      // rather than flagging every page of a client-rendered site as broken.
-      if (!RENDER) add('low', 'on-page', 'handoff', path, 'no <h1> in the raw HTML. If this page is client-rendered the heading may be added by JS — re-run with --render to tell the difference.', 'appearance/title-link');
-    } else if (h1.length > 1) add('low', 'on-page', 'auto-fix', path, `${h1.length} <h1> elements on one page`, 'appearance/title-link');
+    // Only RECORD here. Whether this becomes a finding depends on whether the page is actually
+    // rendered later -- with --render on, only the first N pages are; the rest still need the
+    // raw-only handoff, or the signal silently disappears for them (and for everyone if Chrome dies).
+    // No "exactly one <h1>" rule exists in Google's docs -- the corpus only says to "provide
+    // headings to help users navigate your page". So: no multi-h1 finding, and a MISSING heading is
+    // reported as information for a human, never as a defect.
+    if (!h1.length) out.noRawH1 = true;
     const imgs = [...html.matchAll(/<img\b[^>]*>/gi)].map((m) => m[0]);
     const noAlt = imgs.filter((t) => !/\balt=/i.test(t)).length;
     if (noAlt) add('low', 'on-page', 'auto-fix', path, `${noAlt}/${imgs.length} <img> without alt`, 'appearance/google-images');
@@ -446,6 +456,7 @@ const pages = sameOrigin.slice(0, MAX_PAGES);
 if (sameOrigin.length > MAX_PAGES) console.error(`[audit] NOTE: capping at ${MAX_PAGES} of ${sameOrigin.length} sitemap URLs (--max-pages to raise). Coverage is partial.`);
 
 const rawViews = new Map();
+let renderedUrls = new Set();   // pages a headless browser actually returned HTML for
 for (const u of pages) {
   const { status, body, headers, finalUrl } = await get(u);
   const path = new URL(u).pathname;
@@ -496,15 +507,34 @@ for (const [u, alts] of hreflangGraph) {
 const areAlternates = (a, b) => hreflangGraph.get(norm(a))?.has(norm(b)) || hreflangGraph.get(norm(b))?.has(norm(a));
 const shortPath = (u) => { try { const x = new URL(u); return x.pathname + x.search; } catch { return u; } };
 
+// Count CONNECTED COMPONENTS of the alternate relation, not a greedy first-fit over
+// representatives. With hub-and-spoke hreflang (A~B, B~C, A!~C) greedy first-fit reports a
+// duplicate for crawl order [A,B,C] and stays silent for [B,A,C] -- same site, same graph.
+function clusterCount(urls) {
+  const seen = new Set();
+  let n = 0;
+  for (const start of urls) {
+    if (seen.has(start)) continue;
+    n++;
+    const queue = [start];
+    seen.add(start);
+    while (queue.length) {
+      const cur = queue.pop();
+      for (const other of urls) if (!seen.has(other) && areAlternates(cur, other)) { seen.add(other); queue.push(other); }
+    }
+  }
+  return n;
+}
+
 for (const [label, map, sev, doc] of [['<title>', seenTitle, 'high', 'appearance/title-link'], ['meta description', seenDesc, 'medium', 'appearance/snippet']]) {
   const byValue = new Map();
   for (const [u, v] of map) byValue.set(v, [...(byValue.get(v) || []), u]);
   for (const [v, urls] of byValue) {
     if (urls.length < 2) continue;
-    // collapse each hreflang cluster to a single representative
+    if (clusterCount(urls) < 2) continue;   // one page, N languages — not a duplicate
+    // one representative per component, for the message
     const reps = [];
     for (const u of urls) if (!reps.some((r) => areAlternates(r, u))) reps.push(u);
-    if (reps.length < 2) continue;   // one page, N languages — not a duplicate
     const paths = reps.map(shortPath);
     add(sev, 'on-page', 'auto-fix', paths[0], `${paths.length} distinct pages share one ${label} ("${v.slice(0, 50)}…") — e.g. ${paths.slice(0, 4).join(', ')}${paths.length > 4 ? ` +${paths.length - 4} more` : ''}. If these are client-rendered, the raw HTML is an unrendered shell.`, doc);
   }
@@ -512,9 +542,12 @@ for (const [label, map, sev, doc] of [['<title>', seenTitle, 'high', 'appearance
 
 // raw-vs-rendered delta: the AI-crawler blind spot
 if (RENDER) {
-  const batch = pages.slice(0, Math.min(pages.length, 25));
+  const RENDER_CAP = Number(flag('max-render', 25));
+  const batch = pages.slice(0, Math.min(pages.length, RENDER_CAP));
+  if (pages.length > batch.length) console.error(`[audit] NOTE: rendering only ${batch.length} of ${pages.length} pages (--max-render to raise). The rest are audited raw-only.`);
   if (ghostIs200) batch.push(GHOST); // settle the soft-404 question in the same Chrome session
   const rendered = await renderedHtml(batch);
+  renderedUrls = new Set([...rendered.keys()].filter((k) => rendered.get(k)));
 
   if (ghostIs200) {
     const gh = rendered.get(GHOST);
@@ -533,19 +566,30 @@ if (RENDER) {
       // If this URL's hreflang alternates differ from it ONLY by query string, then one static
       // document is serving every language variant and a baked-in canonical would necessarily be
       // wrong for three of the four. Don't demand an impossible fix — name the structural cause.
-      const queryOnlyAlts = (raw.hreflang || []).some((h) => {
-        try { const a = new URL(h.href, origin); const b = new URL(u); return a.pathname === b.pathname && a.search !== b.search; } catch { return false; }
+      // EVERY non-self alternate must be a query-variant of this same path. If even one alternate
+      // lives at its own path (/fr/x), a static per-path canonical IS possible and should be baked.
+      const others = (raw.hreflang || []).filter((h) => h.lang.toLowerCase() !== 'x-default' && norm(new URL(h.href, u).href) !== norm(u));
+      const queryOnlyAlts = others.length > 0 && others.every((h) => {
+        try { const a = new URL(h.href, u); const b = new URL(u); return a.pathname === b.pathname && a.search !== b.search; } catch { return false; }
       });
       if (queryOnlyAlts) add('medium', 'international', 'handoff', path, `canonical can only be set by JS here: one document answers several ?param language URLs, so no single baked canonical is correct for all of them. Google marks URL-parameter locales "Not recommended" — move to /xx/ subdirectories (or ccTLD/subdomain) and the canonical can be static.`, 'specialty/international/managing-multi-regional-sites');
       else add('medium', 'canonical', 'auto-fix', path, `canonical exists only after JS runs. Google honors it at render time but "we don't recommend using JavaScript for this" — bake it into the HTML source.`, 'javascript/javascript-seo-basics');
     }
-    if (!raw.jsonLdTypes?.length && rv.jsonLdTypes?.length) add('high', 'structured-data', 'auto-fix', path, `structured data (${rv.jsonLdTypes.join(', ')}) exists only after JS runs — AI crawlers and social scrapers never see it`, 'structured-data/generate-structured-data-with-javascript');
+    if (!raw.jsonLdBlockCount && rv.jsonLdTypes?.length) add('high', 'structured-data', 'auto-fix', path, `structured data (${rv.jsonLdTypes.join(', ')}) exists only after JS runs — AI crawlers and social scrapers never see it`, 'structured-data/generate-structured-data-with-javascript');
     if (!raw.hreflang?.length && rv.hreflang?.length) add('high', 'international', 'auto-fix', path, `hreflang exists only after JS runs, and the sitemap does not carry it either. Google sanctions only HTML head / HTTP header / sitemap delivery.`, 'specialty/international/localized-versions');
     if (raw.noRawH1) {
       if (tagText(decomment(html), 'h1').length) add('medium', 'on-page', 'auto-fix', path, '<h1> only exists after JS runs', 'javascript/javascript-seo-basics');
-      else add('medium', 'on-page', 'auto-fix', path, 'no <h1> on the page at all, rendered or raw', 'appearance/title-link');
+      else add('low', 'on-page', 'handoff', path, 'no <h1> anywhere, rendered or raw. Google mandates no h1 count; it asks you to "provide headings to help users navigate your page".', 'fundamentals/seo-starter-guide');
     }
   }
+}
+
+// Pages we never rendered (raw-only run, over the render cap, or Chrome unavailable) still owe an
+// h1 verdict. Without this the signal silently vanishes for them.
+for (const [u, v] of rawViews) {
+  if (!v.noRawH1 || renderedUrls.has(u)) continue;
+  const p = new URL(u).pathname + new URL(u).search;
+  add('low', 'on-page', 'handoff', p, 'no <h1> in the raw HTML, and this page was not rendered. Google mandates no h1 count — it asks you to "provide headings to help users navigate your page". If the page is client-rendered the heading may be added by JS; re-run with --render (or raise --max-render) to tell the difference.', 'fundamentals/seo-starter-guide');
 }
 
 // ---- report -----------------------------------------------------------------------------------
@@ -557,7 +601,7 @@ const handoff = findings.filter((f) => f.class !== 'auto-fix');
 // indistinguishable from a clean one.
 if (!QUIET) {
   console.log(`\n# SEO audit — ${origin}`);
-  console.log(`pages audited: ${pages.length}${RENDER ? ' (raw + rendered)' : ' (raw HTML only; add --render for the JS delta)'}`);
+  console.log(`pages audited: ${pages.length}${RENDER ? ` (raw; ${renderedUrls.size} also rendered)` : ' (raw HTML only; add --render for the JS delta)'}`);
   console.log(`findings: ${findings.length}  |  auto-fix: ${autoFix.length}  |  handoff: ${handoff.length}\n`);
 }
 for (const grp of [['AUTO-FIX (code changes)', autoFix], ['HANDOFF (human / GSC / content)', handoff]]) {

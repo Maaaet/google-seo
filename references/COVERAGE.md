@@ -20,7 +20,7 @@ above cannot drift away from reality.
 | `docs/search/docs/fundamentals/get-on-google.md` | navigational hub |
 | `docs/search/docs/fundamentals/get-started-developers.md` | navigational hub |
 | `docs/search/docs/fundamentals/get-started.md` | navigational hub |
-| `docs/search/docs/guides/javascript-seo-basics.md` | byte-duplicate of crawling-indexing/javascript/javascript-seo-basics.md |
+| `docs/search/docs/guides/javascript-seo-basics.md` | content-duplicate of crawling-indexing/javascript/javascript-seo-basics.md (bodies identical; only the source: frontmatter differs) |
 | `docs/search/docs/monitor-debug/search-operators/image-search.md` | Google Images operators; debugging aid, no site requirement |
 
 Every remaining page is either summarized or listed above as a deliberate omission.
