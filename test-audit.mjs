@@ -16,7 +16,7 @@
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFileSync, unlinkSync, existsSync } from 'node:fs';
+import { readFileSync, unlinkSync, existsSync, readdirSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -707,6 +707,21 @@ const diCyc = diD.findings.filter((f) => /sitemap index cycle/.test(f.message));
 t('[e2e] two sibling sitemaps sharing a child is a diamond, not a cycle', !diCyc.some((f) => /shared\.xml/.test(String(f.where))));
 t('[e2e]  ...and the shared child\'s page is still audited', diD.pages >= 1 && !diD.findings.some((f) => /\/dpg/.test(String(f.where)) && /returns \d/.test(f.message)));
 t('[e2e] a MUTUAL cycle (a -> b -> a) is still reported', diCyc.some((f) => /m1\.xml/.test(String(f.where))));
+
+// [meta] SKILL.md's reference table drifted: 13 sheets on disk, 9 rows in the table, and README
+// said "9 distilled rule sheets". An agent reading SKILL.md would never learn the other four exist.
+// This is a real invariant (every sheet is reachable from the entry point), not a proxy for behavior.
+{
+  const skill = readFileSync(path.join(HERE, 'SKILL.md'), 'utf8');
+  const onDisk = readdirSync(path.join(HERE, 'references')).filter((f) => f.endsWith('.md')).sort();
+  const inTable = [...skill.matchAll(/^\| `references\/([a-zA-Z0-9.-]+)`/gm)].map((m) => m[1]).sort();
+  t('[meta] every reference sheet on disk is listed in SKILL.md', onDisk.every((f) => inTable.includes(f)));
+  t('[meta] every sheet listed in SKILL.md exists on disk', inTable.every((f) => existsSync(path.join(HERE, 'references', f))));
+  t('[meta] SKILL.md lists no sheet twice', new Set(inTable).size === inTable.length);
+  const readme = readFileSync(path.join(HERE, 'README.md'), 'utf8');
+  const claimed = readme.match(/references\/\*\.md\s+(\d+) distilled rule sheets/)?.[1];
+  t('[meta] README\'s sheet count matches the number on disk', Number(claimed) === onDisk.filter((f) => f !== 'COVERAGE.md').length);
+}
 
 // --render when EVERY sitemap URL redirects: must not spawn Chrome, must not hang, must say so.
 const allRedir = createServer((req, res) => {
