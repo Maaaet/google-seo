@@ -72,6 +72,38 @@ t("?p=456 (WordPress post id) is not pagination", pageParam('https://x.com/?p=45
 t("?page=3 is pagination", pageParam('https://x.com/?page=3') === 'page');
 t("amphtml resolves against the page, not the origin", new URL('amp', 'https://x.com/blog/post').href === 'https://x.com/blog/amp');
 
+// Chrome decodes entities in the DOM; a raw fetch does not. Compare decoded, or every static page
+// with an apostrophe in its title is falsely told to prerender.
+const decodeEnts = (s) => s
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&nbsp;/g, '\u00a0').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+t("&#39; decodes to an apostrophe", decodeEnts("It&#39;s") === "It's");
+t("&#8217; (curly) decodes", decodeEnts('It&#8217;s') === 'It\u2019s');
+t("&quot; decodes", decodeEnts('Say &quot;hi&quot;') === 'Say "hi"');
+t("&amp;amp; does not resurrect an entity", decodeEnts('A &amp;amp; B') === 'A &amp; B');
+t("raw-vs-rendered title compare is entity-insensitive", decodeEnts('It&#39;s a Test') === decodeEnts("It's a Test"));
+
+// googlebot-specific noindex must not be hidden by a generic robots meta
+const combined = (h) => [metaC(h, 'name', 'robots'), metaC(h, 'name', 'googlebot')].filter(Boolean).join(' ');
+t("googlebot noindex is seen even when robots=all", /\bnoindex\b/.test(combined('<meta name="robots" content="all"><meta name="googlebot" content="noindex">')));
+t("robots=all alone is not noindex", !/\bnoindex\b/.test(combined('<meta name="robots" content="all">')));
+
+// javascript:void(0) is non-crawlable; #section is a legitimate anchor
+const fakeNav = (h) => [...h.matchAll(/<a\b[^>]*>/gi)].map((m) => m[0])
+  .filter((a) => !/\bhref\s*=/i.test(a) || /href\s*=\s*["']\s*javascript:/i.test(a) || /href\s*=\s*["']\s*#\s*["']/i.test(a)).length;
+t("javascript:void(0) counts as non-crawlable", fakeNav('<a href="javascript:void(0)">x</a>') === 1);
+t("javascript:doThing() counts", fakeNav('<a href="javascript:doThing()">x</a>') === 1);
+t("bare # counts", fakeNav('<a href="#">x</a>') === 1);
+t("#section anchor does NOT count", fakeNav('<a href="#section">x</a>') === 0);
+t("a real link does not count", fakeNav('<a href="/page">x</a>') === 0);
+
+// --max-pages with no value must fall back to the default, not Number(true)===1
+const numFallback = (v, d) => { if (typeof v === 'boolean') return d; const x = Number(v); return Number.isFinite(x) ? x : d; };
+t("--max-pages with no value falls back to the default", numFallback(true, 100) === 100);
+t("--max-pages 500 is honored", numFallback('500', 100) === 500);
+
 // connected components must not depend on iteration order (hub-and-spoke: A~B, B~C, A!~C)
 const graph = new Map([['B', new Set(['A', 'C'])], ['A', new Set(['B'])], ['C', new Set(['B'])]]);
 const areAlt = (a, b) => graph.get(a)?.has(b) || graph.get(b)?.has(a);
@@ -99,6 +131,9 @@ const ROUTES = {
 <url><loc>{B}/dup-b</loc></url>
 <url><loc>{B}/list?page=2</loc></url>
 <url><loc>{B}/commented</loc></url>
+<url><loc>{B}/no-h1</loc></url>
+<url><loc>{B}/entity-title</loc></url>
+<url><loc>{B}/gbot-noindex</loc></url>
 </urlset>`],
   '/ok': ['text/html', page('Unique OK page', '<meta name="description" content="A page that is fine and it&#39;s quoted properly here.">')],
   '/trap': ['text/html', page('Trap page', '<meta name="robots" data-note="content=noindex"><meta name="description" content="This page is not actually noindexed at all.">')],
@@ -107,6 +142,11 @@ const ROUTES = {
   '/dup-b': ['text/html', page('Shared Title', '<meta name="description" content="Distinct description for page B here.">')],
   '/list': ['text/html', page('Listing page two', '<meta name="description" content="The second page of the listing."><link rel="canonical" href="{B}/list">')],
   '/commented': ['text/html', page('Commented page', '<meta name="description" content="Canonical appears only inside a comment."><!-- <link rel="canonical" href="{B}/elsewhere"> -->')],
+  // exercises the h1 paths for real: zero headings, and two headings.
+  '/no-h1': ['text/html', page('Page without any heading', '<meta name="description" content="This page has no heading element.">', '<p>no heading</p>')],
+  '/two-h1': ['text/html', page('Page with two headings', '<meta name="description" content="Two headings, which Google does not forbid.">', '<h1>One</h1><h1>Two</h1>')],
+  '/entity-title': ['text/html', page('It&#39;s an entity title', '<meta name="description" content="Title carries an HTML entity apostrophe.">')],
+  '/gbot-noindex': ['text/html', page('Googlebot noindex page', '<meta name="robots" content="all"><meta name="googlebot" content="noindex"><meta name="description" content="Noindexed for Googlebot only.">')],
 };
 
 const server = createServer((req, res) => {
@@ -132,10 +172,12 @@ const findings = JSON.parse(readFileSync(OUT, 'utf8')).findings;
 unlinkSync(OUT);
 const has = (re) => findings.some((f) => re.test(f.message));
 const count = (re) => findings.filter((f) => re.test(f.message)).length;
+// page-scoped: a global `has()` would be satisfied by a DIFFERENT page's finding.
+const onPage = (p, re) => findings.some((f) => String(f.where).includes(p) && re.test(f.message));
 
 console.log('\n--- integration: the real audit.mjs against a fixture site ---');
 t('[e2e] exits 1 when auto-fix findings remain', code === 1);
-t('[e2e] `data-note="content=noindex"` is NOT reported as noindex', !has(/is noindex/i));
+t('[e2e] `data-note="content=noindex"` is NOT reported as noindex', !onPage('/trap', /is noindex/i));
 t('[e2e] unquoted `content=` is not reported as a missing description', count(/missing meta description/) === 0);
 t('[e2e] a canonical inside an HTML comment is not counted as a tag', !has(/rel=canonical tags/));
 t('[e2e] two real pages sharing a <title> are reported exactly once', count(/share one <title>/) === 1);
@@ -145,7 +187,10 @@ t('[e2e] duplicate `Sitemap:` directives do not double-report', count(/<priority
 t('[e2e] ?page=2 canonicalizing to page 1 is flagged', has(/paginated page canonicalizes to page 1/));
 t('[e2e] a site that returns real 404s gets NO soft-404 finding', !has(/soft 404/i));
 t('[e2e] every finding carries a doc citation', findings.length > 0 && findings.every((f) => f.doc && f.doc.length > 3));
-t('[e2e] no finding asserts an h1-count rule Google never states', !has(/<h1> elements on one page/));
+t('[e2e] a page with ZERO <h1> yields a handoff, not a defect', findings.some((f) => String(f.where).includes('/no-h1') && /no <h1>/.test(f.message) && f.class === 'handoff'));
+t('[e2e] a page with TWO <h1> yields no finding (Google states no h1-count rule)', !has(/elements on one page|multiple <h1>/));
+t('[e2e] an entity in a title is not a duplicate/parse artifact', !findings.some((f) => /&#39;/.test(f.message)));
+t('[e2e] googlebot-only noindex IS detected despite robots=all', onPage('/gbot-noindex', /is noindex/i));
 
 // second fixture: a catch-all that answers 200 for EVERYTHING (the SPA case). The soft-404 probe
 // must fire here, and must not fire above. One test without the other proves nothing.

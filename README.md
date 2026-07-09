@@ -46,8 +46,8 @@ node audit.mjs https://example.com
 # add the rendered-DOM diff — this is the one that finds the real bugs
 node audit.mjs https://example.com --render --json report.json
 
-# large sites
-node audit.mjs https://example.com --render --max-pages 500
+# large sites — note --render only renders the first --max-render pages (default 25)
+node audit.mjs https://example.com --render --max-pages 500 --max-render 100
 
 # tell it which noindex pages are intentional
 node audit.mjs https://example.com --noindex-ok /admin,/preview
@@ -56,6 +56,7 @@ node audit.mjs https://example.com --noindex-ok /admin,/preview
 | Flag | Meaning |
 |---|---|
 | `--render` | Drive headless Chrome (DevTools Protocol) and diff raw vs rendered `<head>`. Set `CHROME=/path/to/chrome` if not auto-found. |
+| `--max-render <n>` | How many pages to actually render (default **25**). Rendering is slow; the rest are audited raw-only and say so. |
 | `--json <file>` | Write findings as JSON. |
 | `--max-pages <n>` | Cap pages crawled (default 100). The tool **logs what it skipped** — a partial crawl that reads "all clear" is the worst possible output. |
 | `--noindex-ok a,b` | Paths where `noindex` is deliberate. |
@@ -85,7 +86,8 @@ de-indexes an entire site.
 **Indexing** — `noindex` in meta *or* `X-Robots-Tag`; sitemap URLs that 404 or redirect.
 
 **On-page** — missing/duplicate `<title>` and meta description (grouped by shared value, so one
-template bug is one finding, not two hundred); missing or multiple `<h1>`; images without `alt`;
+template bug is one finding, not two hundred); a missing `<h1>` (as information, not a defect —
+Google states no h1-count rule); images without `alt`;
 viewport; dead `meta keywords`; `rel=next/prev`.
 
 **International** — hreflang self-reference, `x-default`, and **reciprocity across pages** (Google:

@@ -28,7 +28,12 @@ const base = args.find((a) => !a.startsWith('--'));
 if (!base) { console.error('usage: node audit.mjs <baseUrl> [--json out.json] [--render] [--max-pages n]'); exit(2); }
 const flag = (n, d = null) => { const i = args.indexOf('--' + n); return i === -1 ? d : (args[i + 1]?.startsWith('--') ? true : args[i + 1] ?? true); };
 const has = (n) => args.includes('--' + n);
-const MAX_PAGES = Number(flag('max-pages', 100));
+// `--max-pages` with no value makes flag() return true; Number(true) is 1, which would silently
+// crawl a single page while reporting nothing amiss.
+// `--max-pages` with no value makes flag() return the boolean true, and Number(true) === 1 --
+// finite, so a NaN guard passes it through and we silently crawl a single page. Reject the type.
+const num = (n, d) => { const raw = flag(n, d); if (typeof raw === 'boolean') return d; const v = Number(raw); return Number.isFinite(v) ? v : d; };
+const MAX_PAGES = num('max-pages', 100);
 const NOINDEX_OK = String(flag('noindex-ok', '')).split(',').filter(Boolean);
 const RENDER = has('render');
 const QUIET = has('quiet');
@@ -64,7 +69,16 @@ async function get(url) {
 // explanatory `<!-- no <link rel="canonical"> here -->`) is scored as that tag. Cost me a false
 // "2 canonical tags" on the very first run.
 const decomment = (h) => h.replace(/<!--[\s\S]*?-->/g, '');
-const tagText = (h, t) => [...h.matchAll(new RegExp(`<${t}\\b[^>]*>([\\s\\S]*?)</${t}>`, 'gi'))].map((m) => m[1].replace(/<[^>]+>/g, '').trim());
+// Chrome hands back a DECODED DOM (`&#8217;` -> `’`), while a raw fetch keeps the entity. Compare
+// like with like or every static page whose title contains an entity is falsely reported as
+// "differs raw vs rendered -- prerender your head". WordPress emits &#8217; for apostrophes.
+const decodeEnts = (s) => s
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+  .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+  .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+  .replace(/&nbsp;/g, '\u00a0').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&amp;/g, '&');   // last: never resurrect an entity we just produced
+const tagText = (h, t) => [...h.matchAll(new RegExp(`<${t}\\b[^>]*>([\\s\\S]*?)</${t}>`, 'gi'))].map((m) => decodeEnts(m[1].replace(/<[^>]+>/g, '')).trim());
 // Delimit attribute values by a BACKREFERENCE to the opening quote. A `["']([^"']*)["']` class ends
 // the capture at the first apostrophe, so content="it's great" captured "it" -- which then read as a
 // missing description, or grouped every contraction-sharing page as a "duplicate".
@@ -77,12 +91,13 @@ const UNQ = (name) => `\\s${name}=([^\\s"'>]+)`;
 // The KEY attribute may itself be unquoted (`<meta name=description content=X>`), so match the
 // name with optional quotes and a trailing delimiter.
 const KEY = (attr, key) => `${attr}=["']?${key}(?=["'\\s>])`;
-const metaC = (h, attr, key) => h.match(new RegExp(`<meta[^>]*${KEY(attr, key)}[^>]*${ATTR('content')}`, 'i'))?.[2]
+const metaCRaw = (h, attr, key) => h.match(new RegExp(`<meta[^>]*${KEY(attr, key)}[^>]*${ATTR('content')}`, 'i'))?.[2]
   ?? h.match(new RegExp(`<meta[^>]*${ATTR('content')}[^>]*${KEY(attr, key)}`, 'i'))?.[2]
   ?? h.match(new RegExp(`<meta[^>]*${KEY(attr, key)}[^>]*${UNQ('content')}`, 'i'))?.[1]
   ?? h.match(new RegExp(`<meta[^>]*${UNQ('content')}[^>]*${KEY(attr, key)}`, 'i'))?.[1] ?? '';
-const linkHref = (h, rel) => h.match(new RegExp(`<link[^>]*rel=["']${rel}["'][^>]*${ATTR('href')}`, 'i'))?.[2]
-  ?? h.match(new RegExp(`<link[^>]*${ATTR('href')}[^>]*rel=["']${rel}["']`, 'i'))?.[2] ?? '';
+const metaC = (h, attr, key) => decodeEnts(metaCRaw(h, attr, key));
+const linkHref = (h, rel) => decodeEnts(h.match(new RegExp(`<link[^>]*rel=["']${rel}["'][^>]*${ATTR('href')}`, 'i'))?.[2]
+  ?? h.match(new RegExp(`<link[^>]*${ATTR('href')}[^>]*rel=["']${rel}["']`, 'i'))?.[2] ?? '');
 const allCanonicals = (h) => [...h.matchAll(/<link[^>]*rel=["']canonical["'][^>]*>/gi)].map((m) => m[0]);
 const hreflangs = (h) => [...h.matchAll(/<link[^>]*rel=["']alternate["'][^>]*>/gi)]
   .map((m) => ({ lang: m[0].match(/hreflang=["']([^"']+)["']/i)?.[1], href: m[0].match(/href=["']([^"']+)["']/i)?.[1] }))
@@ -285,7 +300,9 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   }
 
   // robots meta / X-Robots-Tag
-  const robots = metaC(html, 'name', 'robots') || metaC(html, 'name', 'googlebot') || '';
+  // Combine, don't short-circuit: `<meta name="robots" content="all">` alongside
+  // `<meta name="googlebot" content="noindex">` means the page IS noindexed for Google.
+  const robots = [metaC(html, 'name', 'robots'), metaC(html, 'name', 'googlebot')].filter(Boolean).join(' ');
   const xrobots = headers?.get?.('x-robots-tag') || '';
   // "none" is equivalent to "noindex, nofollow" — a page carrying it is fully blocked.
   // Raw view only: the rendered pass would re-report the identical tag with a [rendered] prefix.
@@ -335,7 +352,7 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     // rendered later -- with --render on, only the first N pages are; the rest still need the
     // raw-only handoff, or the signal silently disappears for them (and for everyone if Chrome dies).
     // No "exactly one <h1>" rule exists in Google's docs -- the corpus only says to "provide
-    // headings to help users navigate your page". So: no multi-h1 finding, and a MISSING heading is
+    // headings to help users navigate your pages". So: no multi-h1 finding, and a MISSING heading is
     // reported as information for a human, never as a defect.
     if (!h1.length) out.noRawH1 = true;
     const imgs = [...html.matchAll(/<img\b[^>]*>/gi)].map((m) => m[0]);
@@ -352,7 +369,9 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
 
     // Crawlable links: "use <a> tags with href attributes". onclick/javascript: nav is not crawled.
     const fakeNav = [...html.matchAll(/<a\b[^>]*>/gi)].map((m) => m[0])
-      .filter((a) => !/\bhref\s*=/i.test(a) || /href\s*=\s*["']\s*(javascript:|#)\s*["']/i.test(a)).length;
+      // `javascript:` with ANY payload (void(0), doThing()) is non-crawlable; a bare `#` is too,
+      // but `#section` is a legitimate in-page anchor and must not count.
+      .filter((a) => !/\bhref\s*=/i.test(a) || /href\s*=\s*["']\s*javascript:/i.test(a) || /href\s*=\s*["']\s*#\s*["']/i.test(a)).length;
     if (fakeNav >= 3) add('medium', 'crawling', 'auto-fix', path, `${fakeNav} <a> elements without a crawlable href (missing href, or javascript:/# only)`, 'crawling-indexing/links-crawlable');
 
     // Robots directives that gate previews/AI surfaces and that most audits never look at.
@@ -542,19 +561,19 @@ for (const [label, map, sev, doc] of [['<title>', seenTitle, 'high', 'appearance
 
 // raw-vs-rendered delta: the AI-crawler blind spot
 if (RENDER) {
-  const RENDER_CAP = Number(flag('max-render', 25));
+  const RENDER_CAP = num('max-render', 25);
   const batch = pages.slice(0, Math.min(pages.length, RENDER_CAP));
   if (pages.length > batch.length) console.error(`[audit] NOTE: rendering only ${batch.length} of ${pages.length} pages (--max-render to raise). The rest are audited raw-only.`);
   if (ghostIs200) batch.push(GHOST); // settle the soft-404 question in the same Chrome session
   const rendered = await renderedHtml(batch);
-  renderedUrls = new Set([...rendered.keys()].filter((k) => rendered.get(k)));
 
   if (ghostIs200) {
     const gh = rendered.get(GHOST);
     const ok = gh && /\bnoindex\b/i.test(metaC(decomment(gh), 'name', 'robots'));
     if (!ok) add('high', 'crawling', 'auto-fix', GHOST, 'a nonexistent URL returns HTTP 200 and the rendered page carries no noindex — a soft 404 that Google can index', 'crawling-indexing/javascript/javascript-seo-basics');
-    rendered.delete(GHOST); // not a real page; keep it out of the head-delta comparison
+    rendered.delete(GHOST); // not a real page; keep it out of the head-delta comparison AND the count
   }
+  renderedUrls = new Set([...rendered.keys()].filter((k) => rendered.get(k)));
 
   for (const [u, html] of rendered) {
     if (!html) continue;
@@ -579,7 +598,7 @@ if (RENDER) {
     if (!raw.hreflang?.length && rv.hreflang?.length) add('high', 'international', 'auto-fix', path, `hreflang exists only after JS runs, and the sitemap does not carry it either. Google sanctions only HTML head / HTTP header / sitemap delivery.`, 'specialty/international/localized-versions');
     if (raw.noRawH1) {
       if (tagText(decomment(html), 'h1').length) add('medium', 'on-page', 'auto-fix', path, '<h1> only exists after JS runs', 'javascript/javascript-seo-basics');
-      else add('low', 'on-page', 'handoff', path, 'no <h1> anywhere, rendered or raw. Google mandates no h1 count; it asks you to "provide headings to help users navigate your page".', 'fundamentals/seo-starter-guide');
+      else add('low', 'on-page', 'handoff', path, 'no <h1> anywhere, rendered or raw. Google mandates no h1 count; it asks you to "provide headings to help users navigate your pages".', 'fundamentals/seo-starter-guide');
     }
   }
 }
@@ -589,7 +608,7 @@ if (RENDER) {
 for (const [u, v] of rawViews) {
   if (!v.noRawH1 || renderedUrls.has(u)) continue;
   const p = new URL(u).pathname + new URL(u).search;
-  add('low', 'on-page', 'handoff', p, 'no <h1> in the raw HTML, and this page was not rendered. Google mandates no h1 count — it asks you to "provide headings to help users navigate your page". If the page is client-rendered the heading may be added by JS; re-run with --render (or raise --max-render) to tell the difference.', 'fundamentals/seo-starter-guide');
+  add('low', 'on-page', 'handoff', p, 'no <h1> in the raw HTML, and this page was not rendered. Google mandates no h1 count — it asks you to "provide headings to help users navigate your pages". If the page is client-rendered the heading may be added by JS; re-run with --render (or raise --max-render) to tell the difference.', 'fundamentals/seo-starter-guide');
 }
 
 // ---- report -----------------------------------------------------------------------------------

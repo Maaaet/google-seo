@@ -95,12 +95,13 @@ Read `references/essentials-and-content.md` first (Search Essentials + spam poli
 ## audit.mjs
 
 ```
-node audit.mjs <baseUrl> [--render] [--json out.json] [--max-pages N] [--noindex-ok /a,/b] [--quiet]
+node audit.mjs <baseUrl> [--render] [--json out.json] [--max-pages N] [--max-render N] [--noindex-ok /a,/b] [--quiet]
 ```
 
 - Reads `robots.txt` → sitemap(s) → every page. No npm dependencies.
 - `--render` drives headless Chrome over the DevTools Protocol (set `CHROME=/path` if not
-  auto-found) and diffs raw vs rendered `<head>`. Needs Node ≥ 22.
+  auto-found) and diffs raw vs rendered `<head>`. Needs Node ≥ 22. Only the first `--max-render`
+  pages (default 25) are rendered; the rest are audited raw-only and the report says which.
 - Exit `0` clean · `1` auto-fix findings remain · `2` crawl/setup error.
 - Coverage is capped by `--max-pages` (default 100) and **logs what it skipped** — a partial crawl
   that reads as "all clear" is the worst possible output.
