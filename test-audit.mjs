@@ -342,6 +342,7 @@ const BASE = `http://127.0.0.1:${server.address().port}`;
 const OUT = path.join(HERE, '.test-findings.json');
 
 const code = await new Promise((resolve) => {
+  if (existsSync(OUT)) unlinkSync(OUT);   // a stale file would mask a crash
   const p = spawn('node', [path.join(HERE, 'audit.mjs'), BASE, '--json', OUT, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] });
   p.on('close', resolve);
 });
@@ -407,6 +408,7 @@ const spa = createServer((req, res) => {
 await new Promise((r) => spa.listen(0, '127.0.0.1', r));
 const SPA_BASE = `http://127.0.0.1:${spa.address().port}`;
 const OUT2 = path.join(HERE, '.test-findings2.json');
+if (existsSync(OUT2)) unlinkSync(OUT2);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), SPA_BASE, '--json', OUT2, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 spa.close();
 const spaFindings = JSON.parse(readFileSync(OUT2, 'utf8')).findings;
@@ -424,6 +426,7 @@ const gptFull = createServer((req, res) => {
 await new Promise((r) => gptFull.listen(0, '127.0.0.1', r));
 const GF = `http://127.0.0.1:${gptFull.address().port}`;
 const OUT3 = path.join(HERE, '.test-findings3.json');
+if (existsSync(OUT3)) unlinkSync(OUT3);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), GF, '--json', OUT3, '--quiet', '--max-pages', '1'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 gptFull.close();
 const gfFindings = JSON.parse(readFileSync(OUT3, 'utf8')).findings;
@@ -441,6 +444,7 @@ const contentBlock = createServer((req, res) => {
 await new Promise((r) => contentBlock.listen(0, '127.0.0.1', r));
 const CB = `http://127.0.0.1:${contentBlock.address().port}`;
 const OUTC = path.join(HERE, '.test-findings-cb.json');
+if (existsSync(OUTC)) unlinkSync(OUTC);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), CB, '--json', OUTC, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 contentBlock.close();
 const cbFindings = JSON.parse(readFileSync(OUTC, 'utf8')).findings; unlinkSync(OUTC);
@@ -457,6 +461,7 @@ const assetBlock = createServer((req, res) => {
 await new Promise((r) => assetBlock.listen(0, '127.0.0.1', r));
 const AB = `http://127.0.0.1:${assetBlock.address().port}`;
 const OUTA = path.join(HERE, '.test-findings-ab.json');
+if (existsSync(OUTA)) unlinkSync(OUTA);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), AB, '--json', OUTA, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 assetBlock.close();
 const abFindings = JSON.parse(readFileSync(OUTA, 'utf8')).findings; unlinkSync(OUTA);
@@ -473,6 +478,7 @@ const stacked = createServer((req, res) => {
 await new Promise((r) => stacked.listen(0, '127.0.0.1', r));
 const ST = `http://127.0.0.1:${stacked.address().port}`;
 const OUTS = path.join(HERE, '.test-findings-st.json');
+if (existsSync(OUTS)) unlinkSync(OUTS);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), ST, '--json', OUTS, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 stacked.close();
 const stFindings = JSON.parse(readFileSync(OUTS, 'utf8')).findings; unlinkSync(OUTS);
@@ -491,6 +497,7 @@ const big = createServer((req, res) => {
 await new Promise((r) => big.listen(0, '127.0.0.1', r));
 const BIG = `http://127.0.0.1:${big.address().port}`;
 const OUTB = path.join(HERE, '.test-findings-big.json');
+if (existsSync(OUTB)) unlinkSync(OUTB);   // a stale file would mask a crash
 const bigExit = await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), BIG, '--json', OUTB, '--quiet', '--max-pages', '2'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 big.close();
 const bigWrote = existsSync(OUTB);
@@ -515,6 +522,7 @@ const fmt = createServer((req, res) => {
 await new Promise((r) => fmt.listen(0, '127.0.0.1', r));
 const FMT = `http://127.0.0.1:${fmt.address().port}`;
 const OUTF = path.join(HERE, '.test-findings-fmt.json');
+if (existsSync(OUTF)) unlinkSync(OUTF);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), FMT, '--json', OUTF, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 fmt.close();
 const fmtFindings = JSON.parse(readFileSync(OUTF, 'utf8')).findings; unlinkSync(OUTF);
@@ -549,6 +557,7 @@ const scheme = createServer((req, res) => {
 await new Promise((r) => scheme.listen(0, 'localhost', r));
 const SC = `http://localhost:${scheme.address().port}`;
 const OUTSC = path.join(HERE, '.test-findings-sc.json');
+if (existsSync(OUTSC)) unlinkSync(OUTSC);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), SC, '--json', OUTSC, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 scheme.close();
 const scData = JSON.parse(readFileSync(OUTSC, 'utf8')); unlinkSync(OUTSC);
@@ -602,6 +611,7 @@ const idsrv = createServer((req, res) => {
 await new Promise((r) => idsrv.listen(0, 'localhost', r));
 const ID = `http://localhost:${idsrv.address().port}`;
 const OUTID = path.join(HERE, '.test-findings-id.json');
+if (existsSync(OUTID)) unlinkSync(OUTID);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), ID, '--json', OUTID, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 idsrv.close();
 const idF = JSON.parse(readFileSync(OUTID, 'utf8')).findings; unlinkSync(OUTID);
@@ -641,6 +651,7 @@ else {
   await new Promise((r) => rd.listen(0, 'localhost', r));
   const RD = `http://localhost:${rd.address().port}`;
   const OUTRD = path.join(HERE, '.test-findings-rd.json');
+  if (existsSync(OUTRD)) unlinkSync(OUTRD);   // a stale file would mask a crash
   await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), RD, '--json', OUTRD, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
   rd.close();
   const rdF = JSON.parse(readFileSync(OUTRD, 'utf8')).findings; unlinkSync(OUTRD);
@@ -672,6 +683,7 @@ const nest = createServer((req, res) => {
 await new Promise((r) => nest.listen(0, 'localhost', r));
 const NS = `http://localhost:${nest.address().port}`;
 const OUTNS = path.join(HERE, '.test-findings-ns.json');
+if (existsSync(OUTNS)) unlinkSync(OUTNS);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), NS, '--json', OUTNS, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 nest.close();
 const nsD = JSON.parse(readFileSync(OUTNS, 'utf8')); unlinkSync(OUTNS);
@@ -705,6 +717,7 @@ const dia = createServer((req, res) => {
 await new Promise((r) => dia.listen(0, 'localhost', r));
 const DI = `http://localhost:${dia.address().port}`;
 const OUTDI = path.join(HERE, '.test-findings-di.json');
+if (existsSync(OUTDI)) unlinkSync(OUTDI);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), DI, '--json', OUTDI, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 dia.close();
 const diD = JSON.parse(readFileSync(OUTDI, 'utf8')); unlinkSync(OUTDI);
@@ -737,6 +750,7 @@ const loss = createServer((req, res) => {
 await new Promise((r) => loss.listen(0, 'localhost', r));
 const LS = `http://localhost:${loss.address().port}`;
 const OUTLS = path.join(HERE, '.test-findings-ls.json');
+if (existsSync(OUTLS)) unlinkSync(OUTLS);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), LS, '--json', OUTLS, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 loss.close();
 const lsD = JSON.parse(readFileSync(OUTLS, 'utf8')); unlinkSync(OUTLS);
@@ -759,6 +773,7 @@ const empty = createServer((req, res) => {
 await new Promise((r) => empty.listen(0, 'localhost', r));
 const EM = `http://localhost:${empty.address().port}`;
 const OUTEM = path.join(HERE, '.test-findings-em.json');
+if (existsSync(OUTEM)) unlinkSync(OUTEM);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), EM, '--json', OUTEM, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 empty.close();
 const emD = JSON.parse(readFileSync(OUTEM, 'utf8')); unlinkSync(OUTEM);
@@ -783,12 +798,121 @@ const fan = createServer((req, res) => {
 await new Promise((r) => fan.listen(0, 'localhost', r));
 const FN = `http://localhost:${fan.address().port}`;
 const OUTFN = path.join(HERE, '.test-findings-fn.json');
+if (existsSync(OUTFN)) unlinkSync(OUTFN);   // a stale file would mask a crash
 await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), FN, '--json', OUTFN, '--quiet', '--max-sitemaps', '2'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
 fan.close();
 const fnD = JSON.parse(readFileSync(OUTFN, 'utf8')); unlinkSync(OUTFN);
 
 t('[e2e] a capped robots.txt Sitemap: fan-out SAYS what it skipped', fnD.findings.some((f) => /lists 3 Sitemap: directives; audited the first 2/.test(f.message)));
 t('[e2e]  ...and the sitemaps under the cap were still audited (proves the cap, not a crash)', fnD.pages === 2);
+
+// SOFT 404s ARE PATH-DEPENDENT. A real production site rewrote /property/:slug ->
+// /property/:slug/index.html; unknown slugs resolved to a missing file and the host answered 200 with
+// a ZERO-byte body, while the SPA catch-all 404'd correctly everywhere else. One probe at the site
+// root saw nothing. Google counts an empty page as a soft 404. Probe under each sitemap prefix.
+const sf = createServer((req, res) => {
+  const P = sf.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  const html = (body) => { res.writeHead(200, { 'content-type': 'text/html' }); res.end(body); };
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${B}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') {
+    res.writeHead(200, { 'content-type': 'application/xml' });
+    return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+      `<url><loc>${B}/p/real</loc></url><url><loc>${B}/q/real</loc></url><url><loc>${B}/empty</loc></url></urlset>`);
+  }
+  if (u === '/p/real' || u === '/q/real') return html(page(`Real ${u}`, `<meta name="description" content="A real page under a rewritten prefix.">`));
+  if (u === '/empty') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(''); }   // sitemap URL, 200, empty
+  if (u.startsWith('/p/')) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(''); }  // the Render bug: empty 200
+  if (u.startsWith('/q/')) return html(page('Not found', `<meta name="description" content="A soft 404: 200 with content and no noindex.">`)); // soft 404, has content
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');   // the ROOT probe 404s correctly
+});
+await new Promise((r) => sf.listen(0, 'localhost', r));
+const SF = `http://localhost:${sf.address().port}`;
+const OUTSF = path.join(HERE, '.test-findings-sf.json');
+if (existsSync(OUTSF)) unlinkSync(OUTSF);   // a stale file would mask a crash
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), SF, '--json', OUTSF, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+sf.close();
+const sfF = JSON.parse(readFileSync(OUTSF, 'utf8')).findings; unlinkSync(OUTSF);
+const sfHas = (re) => sfF.some((f) => re.test(f.message));
+
+t('[e2e] the ROOT probe 404s, so a root-only check would see nothing (proves the prefix probe is what fires)', !sfHas(/a nonexistent URL returns HTTP 200 \(soft 404\)/));
+t('[e2e] an unknown URL under a rewritten prefix that returns an EMPTY 200 is a CRITICAL soft 404', sfF.some((f) => f.severity === 'critical' && /unknown URL under \/p\/ returns HTTP 200 with an EMPTY body/.test(f.message)));
+t('[e2e] an unknown URL under a prefix that returns 200 WITH content is a soft 404 too', sfHas(/unknown URL under \/q\/ returns HTTP 200 \(soft 404\)/));
+t('[e2e] a SITEMAP URL answering 200 with an empty body is a critical soft 404, not "missing title"', sfF.some((f) => f.severity === 'critical' && String(f.where) === '/empty' && /EMPTY body/.test(f.message)));
+t('[e2e]  ...and the empty sitemap page is not ALSO reported as merely missing a title', !sfF.some((f) => String(f.where) === '/empty' && /missing <title>/.test(f.message)));
+
+// An SPA answers 200 for EVERY unknown URL, root included. Reporting "returns 200 while the site root
+// correctly does not" per prefix would then be a lie, and duplicate the root soft-404 finding. Caught
+// on a live site: the prefix probe blamed a rewrite rule on /collections/, which has no rule at all.
+// The EMPTY-body case is still news, because an empty response cannot carry the SPA's JS noindex.
+const spa404 = createServer((req, res) => {
+  const P = spa404.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${B}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${B}/s/real</loc></url><url><loc>${B}/e/real</loc></url></urlset>`); }
+  if (u === '/s/real' || u === '/e/real') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page(`Real ${u}`, `<meta name="description" content="A real page on an SPA that 200s everywhere.">`)); }
+  if (u.startsWith('/e/')) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(''); }   // empty 200: still a real defect
+  // everything else, INCLUDING the root probe, is the SPA shell: 200 with content, no noindex in raw HTML
+  res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('App shell', `<meta name="description" content="The SPA shell answers every unknown URL.">`));
+});
+await new Promise((r) => spa404.listen(0, 'localhost', r));
+const SP = `http://localhost:${spa404.address().port}`;
+const OUTSP = path.join(HERE, '.test-findings-sp.json');
+if (existsSync(OUTSP)) unlinkSync(OUTSP);   // a stale file would mask a crash
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), SP, '--json', OUTSP, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+spa404.close();
+const spF = JSON.parse(readFileSync(OUTSP, 'utf8')).findings; unlinkSync(OUTSP);
+
+t('[e2e] when the ROOT also 200s (an SPA), the root soft-404 is reported once', spF.some((f) => /a nonexistent URL returns HTTP 200 \(soft 404\)/.test(f.message)));
+t('[e2e]  ...and no prefix is falsely blamed for "shadowing the 404 path"', !spF.some((f) => /shadowing the 404 path/.test(f.message)));
+t('[e2e]  ...but an EMPTY 200 under a prefix is STILL critical (no HTML can carry the SPA noindex)', spF.some((f) => f.severity === 'critical' && /unknown URL under \/e\/ returns HTTP 200 with an EMPTY body/.test(f.message)));
+
+
+// M8 (R17 engine, code correct but unguarded): key() strips a trailing slash, so a page at /slash/
+// whose canonical is /slash is the SAME page -- a LOW form difference, never a HIGH mismatch.
+const ts = createServer((req, res) => {
+  const P = ts.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${B}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${B}/slash/</loc></url></urlset>`); }
+  if (u === '/slash/' || u === '/slash') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('Slash', `<meta name="description" content="Canonical differs from the loc only by a trailing slash.">` + `<link rel="canonical" href="${B}/slash">`)); }
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => ts.listen(0, 'localhost', r));
+const TS = `http://localhost:${ts.address().port}`;
+const OUTTS = path.join(HERE, '.test-findings-ts.json');
+if (existsSync(OUTTS)) unlinkSync(OUTTS);   // a stale file would mask a crash
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), TS, '--json', OUTTS, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+ts.close();
+const tsF = JSON.parse(readFileSync(OUTTS, 'utf8')).findings; unlinkSync(OUTTS);
+
+t('[e2e] a canonical differing only by a trailing slash is NOT "a different URL"', !tsF.some((f) => /canonical points at a different URL/.test(f.message)));
+t('[e2e]  ...and it IS reported as a form difference (proves the canonical was parsed)', tsF.some((f) => /differ only in form/.test(f.message)));
+
+// M10 (R17 engine, code correct but unguarded): the per-index message must state what was ACTUALLY
+// fetched. It used to print the slice length, which overstates once a sibling index spent the budget.
+const cap = createServer((req, res) => {
+  const P = cap.address().port, B = `http://localhost:${P}`;
+  const u = req.url.split('?')[0];
+  const xml = (b) => { res.writeHead(200, { 'content-type': 'application/xml' }); res.end(b); };
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${B}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') return xml(`<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${[1, 2, 3].map((i) => `<sitemap><loc>${B}/c${i}.xml</loc></sitemap>`).join('')}</sitemapindex>`);
+  const m = u.match(/^\/c(\d)\.xml$/);
+  if (m) return xml(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${B}/cp${m[1]}</loc></url></urlset>`);
+  if (/^\/cp\d$/.test(u)) { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page(`Cap ${u}`, `<meta name="description" content="A page under a capped sitemap index.">`)); }
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => cap.listen(0, 'localhost', r));
+const CP = `http://localhost:${cap.address().port}`;
+const OUTCP = path.join(HERE, '.test-findings-cp.json');
+if (existsSync(OUTCP)) unlinkSync(OUTCP);   // a stale file would mask a crash
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), CP, '--json', OUTCP, '--quiet', '--max-sitemaps', '2'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+cap.close();
+const cpD = JSON.parse(readFileSync(OUTCP, 'utf8')); unlinkSync(OUTCP);
+
+t('[e2e] a capped sitemap index reports what it ACTUALLY fetched, not the slice length', cpD.findings.some((f) => /lists 3 children; 2 fetched, 1 NOT fetched/.test(f.message)));
+t('[e2e]  ...and exactly the children under the cap were audited', cpD.pages === 2);
+
 
 
 // [meta] SKILL.md's reference table drifted: 13 sheets on disk, 9 rows in the table, and README

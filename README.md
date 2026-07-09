@@ -142,7 +142,7 @@ Distilled from `references/`. Each is quoted and sourced in full there.
 - **List only canonical URLs in a sitemap**, verbatim. Google warns: *"don't specify one URL in a sitemap, but a different URL for that same page using `rel="canonical"`."*
 - **hreflang has exactly three sanctioned homes:** HTML `<head>`, HTTP header, or sitemap. Each version "must list itself as well as all other language versions," and *"If two pages don't both point to each other, the tags will be ignored."* Canonicals must stay in-language.
 - **A soft 404 is an indexable error page.** In a client-routed SPA, *"Add a `<meta name="robots" content="noindex">` to error pages using JavaScript."*
-- **`?lang=xx` is the one i18n URL structure Google marks "Not recommended."** Prefer ccTLD, subdomain, or subdirectory.
+- **Putting the locale in a URL parameter is the one i18n structure Google marks "Not recommended."** Google's table names the structure "URL parameters" and gives `site.com?loc=de` as the example; `?lang=xx` is the same structure. The verdict is Google's; applying it to `?lang=` is ours. Prefer ccTLD, subdomain, or subdirectory.
 - **Dynamic rendering is "a workaround and not a recommended solution."** Use SSR, static rendering, or hydration.
 - **Never fabricate `aggregateRating` or `Review` markup.** Structured data must describe what's visibly on the page.
 - **Rich results can be gated.** `VacationRental` needs a Google Technical Account Manager and Hotel Center access. Check before promising a client a rich result they cannot have.

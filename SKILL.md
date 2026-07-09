@@ -80,7 +80,10 @@ Read `references/essentials-and-content.md` first (Search Essentials + spam poli
   version "must list itself as well as all other language versions," plus `x-default`. A canonical
   must point at a page **in the same language**. Reciprocity is enforced: "If two pages don't both
   point to each other, the tags will be ignored."
-- **`?lang=xx` locale URLs are the one i18n structure Google calls "Not recommended."** Prefer
+- **Locale in a URL *parameter* is the one i18n structure Google calls "Not recommended."** Google's
+  table names the structure "URL parameters" and exemplifies it with `site.com?loc=de`; a `?lang=xx`
+  locale param is that same structure, so the label carries over — the generalization is ours, the
+  words "Not recommended." are Google's. Prefer
   ccTLD, subdomain, or subdirectory.
 - **Never fabricate `aggregateRating`/`Review` markup.** Structured data must describe content
   actually visible on the page. This is a manual-action offense.
