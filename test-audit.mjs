@@ -156,6 +156,7 @@ const ROUTES = {
 <url><loc>{B}/gbot-noindex</loc></url>
 <url><loc>{B}/bad-entity</loc></url>
 <url><loc>{B}/script-title</loc></url>
+<url><loc>{B}/two-h1</loc></url>
 <url><loc>{B}/amp-canonical?b=1&amp;c=2</loc></url>
 </urlset>`],
   '/ok': ['text/html', page('Unique OK page', '<meta name="description" content="A page that is fine and it&#39;s quoted properly here.">')],
@@ -167,7 +168,8 @@ const ROUTES = {
   '/commented': ['text/html', page('Commented page', '<meta name="description" content="Canonical appears only inside a comment."><!-- <link rel="canonical" href="{B}/elsewhere"> -->')],
   // exercises the h1 paths for real: zero headings, and two headings.
   '/no-h1': ['text/html', page('Page without any heading', '<meta name="description" content="This page has no heading element.">', '<p>no heading</p>')],
-  '/two-h1': ['text/html', page('Page with two headings', '<meta name="description" content="Two headings, which Google does not forbid.">', '<h1>One</h1><h1>Two</h1>')],
+  // Two headings AND one deliberate img-without-alt, so we can prove the page was really crawled.
+  '/two-h1': ['text/html', page('Page with two headings', '<meta name="description" content="Two headings, which Google does not forbid.">', '<h1>One</h1><h1>Two</h1><img src="/x.png">')],
   '/entity-title': ['text/html', page('It&#39;s an entity title', '<meta name="description" content="Title carries an HTML entity apostrophe.">')],
   '/gbot-noindex': ['text/html', page('Googlebot noindex page', '<meta name="robots" content="all"><meta name="googlebot" content="noindex"><meta name="description" content="Noindexed for Googlebot only.">')],
   // a code point above U+10FFFF used to throw RangeError and abort the whole audit
@@ -216,7 +218,11 @@ t('[e2e] ?page=2 canonicalizing to page 1 is flagged', has(/paginated page canon
 t('[e2e] a site that returns real 404s gets NO soft-404 finding', !has(/soft 404/i));
 t('[e2e] every finding carries a doc citation', findings.length > 0 && findings.every((f) => f.doc && f.doc.length > 3));
 t('[e2e] a page with ZERO <h1> yields a handoff, not a defect', findings.some((f) => String(f.where).includes('/no-h1') && /no <h1>/.test(f.message) && f.class === 'handoff'));
-t('[e2e] a page with TWO <h1> yields no finding (Google states no h1-count rule)', !has(/elements on one page|multiple <h1>/));
+// This must be able to FAIL: assert the page was actually crawled, then that it produced no h1
+// finding. Previously /two-h1 was defined but absent from the sitemap, so the check was vacuous.
+const twoH1Crawled = onPage('/two-h1', /without alt/);   // its img has no alt -> proves it was fetched
+t('[e2e] /two-h1 is actually crawled (guard against a vacuous assertion)', twoH1Crawled);
+t('[e2e] a page with TWO <h1> yields no h1 finding (Google states no h1-count rule)', !onPage('/two-h1', /<h1>/));
 t('[e2e] an entity in a title is not a duplicate/parse artifact', !findings.some((f) => /&#39;/.test(f.message)));
 t('[e2e] googlebot-only noindex IS detected despite robots=all', onPage('/gbot-noindex', /is noindex/i));
 
