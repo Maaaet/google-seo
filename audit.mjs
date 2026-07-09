@@ -61,6 +61,12 @@ const findings = [];
 const add = (sev, area, cls, where, msg, doc) => findings.push({ severity: sev, area, class: cls, where, message: msg, doc });
 
 const SEV_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+// SAME SITE means same HOST. `origin` includes the scheme, so a sitemap listing http:// locs while
+// you audit https:// looked "cross-origin" on every URL -- 5,249 false findings on gnu.org, and
+// every page dropped from the crawl (the audit silently did nothing). A true cross-origin loc is a
+// different HOST (cooking.nytimes.com vs www.nytimes.com), and that is still caught.
+const HOST = (() => { try { return new URL(base).hostname; } catch { return ''; } })();
+const sameSite = (u) => { try { return new URL(u).hostname === HOST; } catch { return false; } };
 // Strip a trailing slash from the PATH only. Operating on the full href would eat the slash inside
 // a query value (`?path=/a/b/`), collapsing two genuinely distinct URLs into one.
 const norm = (u) => {
@@ -79,7 +85,7 @@ async function get(url, tries = 2) {
       const r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'en' }, redirect: 'follow' });
       // 429/503 are TRANSIENT (Google retries them for ~2 days and honors Retry-After). Retry once
       // ourselves before reporting -- a fast crawl self-induces 429s that a real crawler would not.
-      if ((r.status === 429 || r.status === 503) && i < tries) {
+      if ((r.status === 429 || r.status === 503 || r.status === 403) && i < tries) {
         const ra = Number(r.headers.get('retry-after'));
         await sleep(Math.min(Number.isFinite(ra) ? ra * 1000 : 500 * (i + 1), 4000));
         continue;
@@ -100,6 +106,9 @@ async function get(url, tries = 2) {
 }
 // Google treats 429/503/5xx as temporary; only 4xx (except 429) means the URL is really gone.
 const isTransient = (s) => s === 429 || s === 503 || (s >= 500 && s < 600);
+// 401/403 usually mean bot protection or an auth wall, not "this page is gone". A human must judge
+// whether the block is intentional; the audit's own request rate can also induce a 403.
+const isBlocked = (s) => s === 401 || s === 403;
 
 // ---- tiny HTML helpers (raw-HTML view = what a non-rendering crawler sees) ----------------------
 // Comments are NOT markup. Strip them first or a doc-comment that mentions a tag (e.g. an
@@ -284,7 +293,13 @@ function validateLocs(locs, where) {
     if (!/^https?:\/\//i.test(l)) { add('high', 'sitemap', 'auto-fix', where, `<loc> not absolute: ${l}`, 'sitemaps/build-sitemap'); continue; }
     if (/&(?!amp;|lt;|gt;|quot;|apos;|#)/.test(l)) add('high', 'sitemap', 'auto-fix', where, `<loc> has unescaped & : ${l}`, 'sitemaps/build-sitemap');
     if (l.includes('#')) add('medium', 'sitemap', 'auto-fix', where, `<loc> contains a fragment: ${l}`, 'consolidate-duplicate-urls');
-    try { if (new URL(l).origin !== origin) add('medium', 'sitemap', 'handoff', where, `<loc> is cross-origin (${l}) — valid only if submitted in GSC or referenced from that host's robots.txt`, 'sitemaps/build-sitemap'); }
+    try {
+      if (!sameSite(l)) {
+        // One finding per foreign HOST, not per URL: a big sitemap would emit thousands.
+        const h = new URL(l).hostname;
+        if (!crossHosts.has(h)) { crossHosts.add(h); add('medium', 'sitemap', 'handoff', where, `<loc> entries point at another host (${h}) — valid only if submitted in GSC or referenced from that host's robots.txt`, 'sitemaps/build-sitemap'); }
+      }
+    }
     catch { add('high', 'sitemap', 'auto-fix', where, `<loc> is not a valid URL: ${l}`, 'sitemaps/build-sitemap'); }
   }
 }
@@ -320,7 +335,9 @@ async function auditSitemapTree(url) {
       // An index whose child is an index. Do NOT treat the grandchild sitemap URLs as pages --
       // they'd be fetched and scored as HTML ("missing <title>" on an .xml file), while the real
       // pages never get audited at all.
-      add('high', 'sitemap', 'auto-fix', child, 'a sitemap index lists another sitemap index — nested indexes are not supported; point the index at urlset sitemaps', 'sitemaps/large-sitemaps');
+      // Google's page does not itself forbid nesting; it defers the format: the XML "is defined by
+      // the Sitemap Protocol". The protocol has no nested-index form. Say that, don't invent a quote.
+      add('high', 'sitemap', 'auto-fix', child, 'a sitemap index lists another sitemap index. Google defers the index format to the Sitemap Protocol ("it\'s defined by the Sitemap Protocol"), which has no nested-index form — point the index at urlset sitemaps', 'sitemaps/large-sitemaps');
       continue;
     }
     validateLocs(locs, child);
@@ -344,6 +361,7 @@ async function auditSitemap(smUrls) {
 
 // ---- per page ---------------------------------------------------------------------------------
 const seenTitle = new Map(), seenDesc = new Map(), canonicalTargets = new Map();
+const crossHosts = new Set();      // foreign hosts already reported (one finding each, not per-loc)
 const hreflangGraph = new Map();   // url -> Set(alternate urls it declares)
 const sitemapAlts = new Map();     // url -> [{lang, href}] declared via <xhtml:link> in the sitemap
 
@@ -414,7 +432,9 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     const via = out.hreflangFromSitemap ? ' (delivered via sitemap)' : '';
     const selfListed = out.hreflang.some((h) => norm(h.href) === norm(url));
     if (!selfListed) add('high', 'international', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}hreflang set${via} does not list itself — "Each language version must list itself as well as all other language versions"`, 'specialty/international/localized-versions');
-    if (!out.hreflang.some((h) => h.lang.toLowerCase() === 'x-default')) add('low', 'international', 'auto-fix', path, `${tag}no x-default hreflang${via}`, 'specialty/international/localized-versions');
+    // Only meaningful with real alternates: a lone self-referential hreflang needs no x-default.
+    const realAlts = out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default' && norm(h.href) !== norm(url));
+    if (realAlts.length && !out.hreflang.some((h) => h.lang.toLowerCase() === 'x-default')) add('low', 'international', 'auto-fix', path, `${tag}no x-default hreflang${via}`, 'specialty/international/localized-versions');
     // reciprocity is a CROSS-page property; record the graph and check it after the crawl
     if (view === 'raw') hreflangGraph.set(norm(url), new Set(out.hreflang.filter((h) => h.lang.toLowerCase() !== 'x-default').map((h) => norm(h.href))));
   }
@@ -575,7 +595,7 @@ await siteProbes();
 const { sitemaps } = await auditRobots();
 let urls = await auditSitemap(sitemaps);
 if (!urls.length) urls = [origin + '/'];
-const sameOrigin = urls.filter((u) => { try { return new URL(u).origin === origin; } catch { return false; } });
+const sameOrigin = urls.filter(sameSite);   // same HOST; http<->https of one host is one site
 const pages = sameOrigin.slice(0, MAX_PAGES);
 if (sameOrigin.length > MAX_PAGES) console.error(`[audit] NOTE: capping at ${MAX_PAGES} of ${sameOrigin.length} sitemap URLs (--max-pages to raise). Coverage is partial.`);
 
@@ -589,6 +609,7 @@ for (const u of pages) {
     // supposed to be 503. Reporting it as a critical de-index (like a 404) is wrong, and the
     // fast crawl itself can induce 429s. Hand it off to re-run slower, don't fail the page.
     if (isTransient(status)) add('medium', 'crawling', 'handoff', path, `sitemap URL is temporarily ${status} (transient — Google retries these; re-run slower if the crawl induced it)`, 'crawling-indexing/troubleshoot-crawling-errors');
+    else if (isBlocked(status)) add('medium', 'crawling', 'handoff', path, `sitemap URL returns ${status} to this crawler — usually bot protection or an auth wall, not a de-indexed page. Confirm Googlebot is not blocked.`, 'crawling-indexing/troubleshoot-crawling-errors');
     else add('critical', 'indexing', 'auto-fix', path, `sitemap URL returns ${status}`, 'crawling-indexing/troubleshoot-crawling-errors');
     continue;
   }

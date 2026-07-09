@@ -494,9 +494,11 @@ const fmt = createServer((req, res) => {
   const b = `http://127.0.0.1:${fmt.address().port}`;
   const u = req.url.split('?')[0];
   if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${b}/sitemap.xml.gz\n`); }
-  if (u === '/sitemap.xml.gz') { const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${b}/gzpage</loc></url><url><loc>${b}/ratelimited</loc></url><url><loc>${b}/unq-canon</loc></url><url><loc>${b}/multitok-canon</loc></url></urlset>`; res.writeHead(200, { 'content-type': 'application/gzip' }); return res.end(gzipSync(Buffer.from(xml))); }
+  if (u === '/sitemap.xml.gz') { const xml = `<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"><url><loc>${b}/gzpage</loc></url><url><loc>${b}/ratelimited</loc></url><url><loc>${b}/unq-canon</loc></url><url><loc>${b}/multitok-canon</loc></url><url><loc>${b}/botblocked</loc></url><url><loc>${b}/lone-hreflang</loc></url></urlset>`; res.writeHead(200, { 'content-type': 'application/gzip' }); return res.end(gzipSync(Buffer.from(xml))); }
   if (u === '/gzpage') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page('Gz page', '<meta name="description" content="Reached only if the gz sitemap decompressed.">')); }
   if (u === '/ratelimited') { res.writeHead(429, { 'retry-after': '0' }); return res.end('rate limited'); }
+  if (u === '/botblocked') { res.writeHead(403); return res.end('forbidden'); }
+  if (u === '/lone-hreflang') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(`<!doctype html><html lang=en><head><meta name=viewport content="width=device-width"><title>Lone hreflang</title><meta name="description" content="Only a self-referential hreflang, no alternates."><link rel="alternate" hreflang="en-us" href="${b}/lone-hreflang"></head><body><h1>H</h1></body></html>`); }
   if (u === '/unq-canon') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(`<!doctype html><html lang=en><head><meta name=viewport content="width=device-width"><title>Unquoted canonical</title><meta name="description" content="Its canonical points elsewhere, unquoted."><link rel=canonical href=${b}/elsewhere></head><body><h1>H</h1></body></html>`); }
   if (u === '/multitok-canon') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(`<!doctype html><html lang=en><head><meta name=viewport content="width=device-width"><title>Multi-token rel canonical</title><meta name="description" content="Canonical is the last token of a multi-value rel here."><link rel="alternate canonical" href="${b}/somewhere-else"></head><body><h1>H</h1></body></html>`); }
   res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
@@ -510,8 +512,42 @@ const fmtFindings = JSON.parse(readFileSync(OUTF, 'utf8')).findings; unlinkSync(
 t('[e2e] a gzipped sitemap is decompressed (its 429 page is reached, proving the loc was parsed)', fmtFindings.some((f) => /ratelimited/.test(String(f.where))));
 t('[e2e] a gzipped sitemap does not fire a false Content-Type finding', !fmtFindings.some((f) => /expected a sitemap format/.test(f.message)));
 t('[e2e] a 429 is a transient handoff, not a critical de-index', fmtFindings.some((f) => /temporarily 429/.test(f.message) && f.class === 'handoff') && !fmtFindings.some((f) => /429/.test(f.message) && f.severity === 'critical'));
+
+// SAME HOST, different SCHEME: a sitemap listing http:// locs while we audit the same host must NOT
+// be called cross-origin, and its pages must still be crawled. gnu.org emitted 5,249 false
+// "cross-origin" findings and audited ZERO pages. A genuinely foreign host is still reported, once.
+const scheme = createServer((req, res) => {
+  const b = `http://127.0.0.1:${scheme.address().port}`;
+  const u = req.url.split('?')[0];
+  if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${b}/sitemap.xml\n`); }
+  if (u === '/sitemap.xml') {
+    res.writeHead(200, { 'content-type': 'application/xml' });
+    // 3 same-host locs written with an explicit host+port (same host), + 2 locs on a foreign host
+    return res.end(`<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` +
+      `<url><loc>${b}/p1</loc></url><url><loc>${b}/p2</loc></url>` +
+      `<url><loc>${b.replace('http://', 'https://')}/p3</loc></url>` +
+      `<url><loc>http://other.example.com/a</loc></url><url><loc>http://other.example.com/b</loc></url>` +
+      `</urlset>`);
+  }
+  if (u === '/p1' || u === '/p2') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end(page(`Page ${u}`, `<meta name="description" content="A same-host page reached over the audited scheme ${u}.">`)); }
+  res.writeHead(404, { 'content-type': 'text/html' }); res.end('<h1>404</h1>');
+});
+await new Promise((r) => scheme.listen(0, '127.0.0.1', r));
+const SC = `http://127.0.0.1:${scheme.address().port}`;
+const OUTSC = path.join(HERE, '.test-findings-sc.json');
+await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), SC, '--json', OUTSC, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+scheme.close();
+const scData = JSON.parse(readFileSync(OUTSC, 'utf8')); unlinkSync(OUTSC);
+const scCross = scData.findings.filter((f) => /another host/.test(f.message));
+t('[e2e] same-host locs are crawled (pages audited > 0)', scData.pages >= 2);
+t('[e2e] a genuinely foreign host is reported exactly ONCE, not per-loc', scCross.length === 1);
+t('[e2e] the foreign-host finding names the host', scCross.length === 1 && /other\.example\.com/.test(scCross[0].message));
+// the discriminator: a same-host loc that differs only by SCHEME must not be called another host
+t('[e2e] a same-host http/https scheme difference is NOT reported as another host', !scCross.some((f) => /127\.0\.0\.1/.test(f.message)));
 t('[e2e] an UNQUOTED canonical pointing elsewhere is flagged, not silently missed', fmtFindings.some((f) => /\/unq-canon/.test(String(f.where)) && /canonical points at a different URL/.test(f.message)));
 t('[e2e] canonical as the LAST token of a multi-value rel is detected', fmtFindings.some((f) => /\/multitok-canon/.test(String(f.where)) && /canonical points at a different URL/.test(f.message)));
+t('[e2e] a 403 is a handoff (bot protection), not a critical de-index', fmtFindings.some((f) => /\/botblocked/.test(String(f.where)) && f.class === 'handoff') && !fmtFindings.some((f) => /\/botblocked/.test(String(f.where)) && f.severity === 'critical'));
+t('[e2e] a lone self-referential hreflang does not demand x-default', !fmtFindings.some((f) => /\/lone-hreflang/.test(String(f.where)) && /x-default/.test(f.message)));
 
 // --render when EVERY sitemap URL redirects: must not spawn Chrome, must not hang, must say so.
 const allRedir = createServer((req, res) => {
