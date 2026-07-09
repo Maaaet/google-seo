@@ -206,6 +206,15 @@ const count = (re) => findings.filter((f) => re.test(f.message)).length;
 const onPage = (p, re) => findings.some((f) => String(f.where).includes(p) && re.test(f.message));
 
 console.log('\n--- integration: the real audit.mjs against a fixture site ---');
+
+// STRUCTURAL GUARD: every fixture page must be reachable from the sitemap, or its assertions are
+// vacuous. A page defined in ROUTES but absent from <urlset> is never fetched, and any `!has(...)`
+// about it passes no matter what the code does. This exact mistake has been made twice.
+const sitemapXml = ROUTES['/sitemap.xml'][1];
+const orphans = Object.keys(ROUTES)
+  .filter((r) => !['/robots.txt', '/sitemap.xml'].includes(r))
+  .filter((r) => !sitemapXml.includes(`{B}${r}<`) && !sitemapXml.includes(`{B}${r}?`));
+t(`[meta] no orphan fixture pages (unreachable => vacuous assertions)${orphans.length ? ': ' + orphans.join(', ') : ''}`, orphans.length === 0);
 t('[e2e] exits 1 when auto-fix findings remain', code === 1);
 t('[e2e] `data-note="content=noindex"` is NOT reported as noindex', !onPage('/trap', /is noindex/i));
 t('[e2e] unquoted `content=` is not reported as a missing description', count(/missing meta description/) === 0);
