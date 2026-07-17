@@ -1,7 +1,8 @@
 # google-seo
 
 A Claude Code / Agent skill that does SEO the way **Google documents it**, not the way blog posts
-remember it.
+remember it — extended with **GEO/AEO auditing** (AI answer-engine visibility: ChatGPT, Claude,
+Perplexity, AI Overviews, Copilot) on top of the original [ceoguy/google-seo](https://github.com/ceoguy/google-seo).
 
 It ships three things:
 
@@ -31,11 +32,55 @@ pointing at the homepage — quietly telling Google that every page was a duplic
 ## Install
 
 ```bash
-git clone https://github.com/ceoguy/google-seo.git ~/.claude/skills/google-seo
+git clone https://github.com/Maaaet/google-seo.git ~/.claude/skills/google-seo
 ```
 
 Claude Code discovers it automatically as a **skill**. Or just run the auditor standalone — it needs
 **Node ≥ 22** and nothing else (Chrome only for `--render`).
+
+## What's new in v1.1 (this fork)
+
+Everything below is additive; all 189 original regression tests still pass (203 total with the new ones).
+
+- **GEO / AEO auditing.** A new rule sheet, [`references/geo.md`](references/geo.md), with two
+  labeled sourcing tiers: **[corpus]** rules quote Google's own AI-optimization guide (which is in
+  `docs/` and quote-verified like everything else), **[vendor]** rules cite OpenAI / Anthropic /
+  Perplexity / Apple / Meta / Common Crawl documentation by URL. Nothing unsourced.
+- **AI crawlers by role.** The auditor now knows 15 AI user-agents and what blocking each one
+  actually costs. Blocking a search/index crawler (OAI-SearchBot, PerplexityBot, Claude-SearchBot,
+  Bingbot/Copilot, DuckAssistBot, Amazonbot) or a user-triggered fetcher (ChatGPT-User,
+  Claude-User, Perplexity-User, MistralAI-User) removes a live answer surface — reported `medium`.
+  Blocking a training crawler (GPTBot, ClaudeBot, CCBot, Applebot-Extended, Meta-ExternalAgent) is
+  a legitimate policy choice — reported once, `low`, and the tool never nags you to unblock a bot
+  you meant to block.
+- **Raw-vs-rendered main-content delta** (`--render`). The original diffed the `<head>`; v1.1 also
+  measures the body text an SPA shell hides from every non-rendering consumer — the single biggest
+  GEO defect a crawler-side tool can catch. Raw-only runs flag near-empty raw pages as a handoff.
+- **llms.txt, honestly.** A missing llms.txt is a NON-finding (Google documents that Google Search
+  ignores it, and no major answer engine documents reading it). Only a present-but-broken file
+  (served as HTML by a rewrite) or a present-and-fine one (expectation-setting note) is reported.
+- **Snippet controls as AI levers.** `nosnippet` and tight `max-snippet` also cap what AI Overviews
+  can show; surfaced as confirm-intent handoffs, citing Google's AI-features doc.
+- **Open Graph / unfurler metadata.** `og:title` / `og:description` / `og:image` checked in the raw
+  view (unfurlers never render JS), aggregated into ONE site-wide finding instead of per-page
+  noise. Under `--render`, OG that exists only after hydration is called out as dead weight.
+- **Per-type structured data validation.** Required-property checks mirroring the corpus tables for
+  Event, JobPosting, Recipe, VideoObject, LocalBusiness, BreadcrumbList (including per-ListItem
+  position/item), and Product's review-or-rating-or-offers rule. Article/NewsArticle/BlogPosting
+  get a `low` for missing recommended dates/author (the freshness signals AI retrieval favors).
+  FAQPage and HowTo report **UNKNOWN eligibility** because the corpus no longer documents them.
+- **Sitemap extensions.** Image (1,000-per-`<url>` limit), video (required thumbnail_loc / title /
+  description, content_loc-or-player_loc), news (1,000-entry limit, required publication tags,
+  two-day recency rule). Checked only when the namespaces are actually present.
+- **Path-based pagination.** `/page/2/` canonicalizing to page 1 is now caught alongside `?page=N`.
+- **Uncapped by default.** `--max-pages`, `--max-render`, `--max-sitemaps`, and
+  `--max-prefix-probes` now default to **unlimited** — an audit's job is the whole site, and a
+  default cap is a silent partial crawl. The flags remain for when a site is huge and time is not.
+  Per-request timeouts and the sitemap cycle/depth guards stay: those prevent hangs, not coverage.
+- **New slash command.** `/google-seo-geo <url>` runs a GEO-focused audit and triages the
+  ai-search / javascript / social / structured-data areas against `references/geo.md`.
+- **14 new regression tests** covering all of the above (`node test-audit.mjs`; set
+  `TEST_BIG_URLS=1500` on slow machines to shrink the 120k-URL stress fixture).
 
 ## Using it in Claude Code
 
@@ -57,7 +102,8 @@ cp ~/.claude/skills/google-seo/commands/*.md ~/.claude/commands/
 | `/google-seo-audit <url>` | Read-only audit of a live site. Runs the auditor, groups findings by root cause, splits auto-fix vs handoff. |
 | `/google-seo-fix [url]` | Run from inside the site's repo: audit → fix the auto-fix findings in code → re-audit until two clean runs. |
 | `/google-seo-plan <topic\|url>` | A sequenced SEO plan in the skill's build-order, every recommendation citing the Google doc. |
-| `/google-seo` | Catch-all — audit, fix, plan, or look up a rule; routes by what you type. |
+| `/google-seo-geo <url>` | GEO/AEO audit: AI crawler access, JS-invisible content, unfurler metadata, AI-surface eligibility. |
+| `/google-seo` | Catch-all — audit, fix, plan, GEO, or look up a rule; routes by what you type. |
 
 Every command grounds its answer in the local corpus, never in blog folklore. New commands and skills
 show up in a **new** Claude Code session (the list loads at startup).
