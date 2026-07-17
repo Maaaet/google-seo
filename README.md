@@ -2,7 +2,7 @@
 
 A Claude Code / Agent skill that does SEO the way **Google documents it**, not the way blog posts
 remember it — extended with **GEO/AEO auditing** (AI answer-engine visibility: ChatGPT, Claude,
-Perplexity, AI Overviews, Copilot) on top of the original [ceoguy/google-seo](https://github.com/ceoguy/google-seo).
+Perplexity, AI Overviews, Copilot).
 
 It ships three things:
 
