@@ -5,9 +5,10 @@
  *   node audit.mjs <baseUrl> [options]
  *
  *   --json <file>        write findings as JSON
- *   --max-pages <n>      cap pages crawled (default 100)
- *   --max-render <n>     cap pages rendered with --render (default 25); the rest are raw-only
- *   --max-sitemaps <n>   cap child sitemaps fetched from an index (default 50)
+ *   --max-pages <n>      cap pages crawled (default: UNLIMITED — audit everything)
+ *   --max-render <n>     cap pages rendered with --render (default: UNLIMITED; rendering costs
+ *                        seconds per page, so set a cap when a site is huge and time is not)
+ *   --max-sitemaps <n>   cap child sitemaps fetched from an index (default: UNLIMITED)
  *   --noindex-ok a,b     paths where noindex is intentional
  *   --render             ALSO fetch each page with headless Chrome and diff raw vs rendered head.
  *                        This is how you catch client-rendered SEO: Google renders JS (with a queue
@@ -41,11 +42,18 @@ const num = (n, d) => {
   const raw = flag(n, d);
   if (typeof raw === 'boolean') return d;
   const v = Number(raw);
-  if (!Number.isFinite(v) || v < 1) { if (raw !== d) console.error(`[audit] --${n} must be a positive integer; using ${d}`); return d; }
+  if (!Number.isFinite(v) || v < 1) { if (raw !== d) console.error(`[audit] --${n} must be a positive integer; using ${d === UNLIMITED ? 'unlimited' : d}`); return d; }
   return Math.floor(v);
 };
-const MAX_PAGES = num('max-pages', 100);
-const MAX_SITEMAPS = num('max-sitemaps', 50);  // child-sitemap fetch cap; a 2000-child index would otherwise hang
+// Coverage caps default to UNLIMITED: an audit's job is the whole site, and a default cap is a
+// silent partial crawl (the failure mode this tool exists to avoid). The --max-* flags remain for
+// when a site is huge and time is not. What stays bounded regardless: per-request timeouts and
+// retries, the per-page render timeout, and the sitemap-recursion depth/cycle guards — those
+// prevent HANGS, not coverage. An uncapped crawl of a 50k-page site is hours of sequential
+// fetches, and uncapped --render is seconds of Chrome per page; that is the operator's call.
+const UNLIMITED = Number.MAX_SAFE_INTEGER;
+const MAX_PAGES = num('max-pages', UNLIMITED);
+const MAX_SITEMAPS = num('max-sitemaps', UNLIMITED);  // cap on child-sitemap fetches across the whole tree
 const NOINDEX_OK = String(flag('noindex-ok', '')).split(',').filter(Boolean);
 const RENDER = has('render');
 const QUIET = has('quiet');
@@ -200,7 +208,30 @@ const jsonLdBlocks = (h) => [...h.matchAll(/<script[^>]*type=["']application\/ld
 
 // ---- robots.txt -------------------------------------------------------------------------------
 // "it is not a mechanism for keeping a web page out of Google" — robots/intro
-const AI_BOTS = ['GPTBot', 'ClaudeBot', 'PerplexityBot', 'OAI-SearchBot', 'Google-Extended'];
+// AI crawlers by ROLE, because blocking each role costs something different (see references/geo.md,
+// which carries the vendor source URLs; these names are vendor-documented, not Google-documented):
+//   search:   blocking removes you from that engine's live answer/citation surface. medium.
+//   user:     blocking breaks user-triggered "open this page" fetches in that assistant. medium.
+//   training: blocking is an IP/policy choice, not a visibility bug. low, informational, and the
+//             audit never tells you to unblock a bot you meant to block.
+// Google-Extended stays special: it is corpus-documented and governs neither Search nor AI Overviews.
+const AI_CRAWLERS = [
+  { ua: 'OAI-SearchBot',    role: 'search',   cost: 'ChatGPT search cannot index or cite this site' },
+  { ua: 'ChatGPT-User',     role: 'user',     cost: 'user-triggered fetches from ChatGPT fail (links to this site cannot be opened live)' },
+  { ua: 'GPTBot',           role: 'training', cost: 'future OpenAI models will not train on this site; does NOT remove ChatGPT search citation (that is OAI-SearchBot)' },
+  { ua: 'Claude-SearchBot', role: 'search',   cost: 'Claude search cannot index or cite this site' },
+  { ua: 'Claude-User',      role: 'user',     cost: 'user-triggered fetches from Claude fail' },
+  { ua: 'ClaudeBot',        role: 'training', cost: 'future Anthropic models will not train on this site' },
+  { ua: 'PerplexityBot',    role: 'search',   cost: 'Perplexity cannot index or cite this site' },
+  { ua: 'Perplexity-User',  role: 'user',     cost: 'user-triggered fetches from Perplexity fail' },
+  { ua: 'Bingbot',          role: 'search',   cost: 'the site leaves Bing AND the Microsoft Copilot answers built on its index' },
+  { ua: 'DuckAssistBot',    role: 'search',   cost: 'DuckDuckGo DuckAssist cannot cite this site' },
+  { ua: 'Amazonbot',        role: 'search',   cost: 'Alexa/Rufus answers cannot draw on this site' },
+  { ua: 'MistralAI-User',   role: 'user',     cost: 'user-triggered fetches from Mistral Le Chat fail' },
+  { ua: 'Applebot-Extended', role: 'training', cost: 'Apple foundation models will not train on this site (Applebot search/Siri indexing is a separate bot)' },
+  { ua: 'CCBot',            role: 'training', cost: 'the site leaves the Common Crawl dumps that many labs train on' },
+  { ua: 'Meta-ExternalAgent', role: 'training', cost: 'Meta AI models will not train on this site' },
+];
 // Consecutive `User-agent:` lines SHARE the rule block that follows them. Parse into
 // agent -> rules[]; a lazy "until the next User-agent line" regex gives the first agent in a
 // stacked group zero rules, so `User-agent: *\nUser-agent: Googlebot\nDisallow: /` reads as
@@ -233,17 +264,26 @@ async function auditRobots() {
   const groups = robotsGroups(body);
   const blocksAll = (agent) => (groups.get(agent.toLowerCase()) || []).some((l) => /^Disallow:\s*\/\s*$/i.test(l));
   if (blocksAll('*')) add('critical', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt blocks all crawlers (User-agent: * / Disallow: /)', 'robots/intro');
-  for (const b of AI_BOTS) {
-    if (!blocksAll(b)) continue;
-    // Google-Extended governs Gemini/Vertex model TRAINING, not Search or AI-Overviews citation --
-    // blocking it does not remove you from any answer surface, unlike the answer-engine crawlers.
-    if (b === 'Google-Extended') {
-      // Google-Extended governs "AI training and grounding in some of Google's other systems", NOT
-      // Search or AI Overviews (which run on Googlebot). Blocking it removes you from no answer surface.
-      add('low', 'ai-search', 'handoff', '/robots.txt', 'Google-Extended is disallowed — this limits AI training/grounding in some of Google\'s other systems, NOT Google Search or AI Overviews citation', 'appearance/ai-features');
-    } else {
-      add('medium', 'ai-search', 'handoff', '/robots.txt', `${b} is fully disallowed — that engine cannot cite this site`, 'robots/intro');
+  // Google-Extended governs "AI training and grounding in some of Google's other systems", NOT
+  // Search or AI Overviews (which run on Googlebot). Blocking it removes you from no answer surface.
+  if (blocksAll('Google-Extended')) {
+    add('low', 'ai-search', 'handoff', '/robots.txt', 'Google-Extended is disallowed — this limits AI training/grounding in some of Google\'s other systems, NOT Google Search or AI Overviews citation', 'appearance/ai-features');
+  }
+  // A `*` block-all already produced its own critical; repeating it per AI bot would bury it under
+  // fifteen findings that all mean "everything is blocked".
+  if (!blocksAll('*')) {
+    const blockedTraining = [];
+    for (const { ua, role, cost } of AI_CRAWLERS) {
+      if (!blocksAll(ua)) continue;
+      if (role === 'training') { blockedTraining.push(ua); continue; }
+      add('medium', 'ai-search', 'handoff', '/robots.txt',
+        `${ua} is fully disallowed: ${cost}. Confirm this is intentional (blocking a ${role === 'user' ? 'user-triggered fetcher' : 'search/index crawler'} removes a live answer surface, not just training).`,
+        'references/geo.md#ai-crawlers');
     }
+    // Training blocks in ONE informational finding: a policy choice, listed, never nagged per-bot.
+    if (blockedTraining.length) add('low', 'ai-search', 'handoff', '/robots.txt',
+      `training crawlers disallowed (${blockedTraining.join(', ')}): a legitimate IP/policy choice. Cost is model-knowledge only, not live citation. ${AI_CRAWLERS.filter((c) => c.role === 'training' && blockedTraining.includes(c.ua)).map((c) => `${c.ua}: ${c.cost}`).join('; ')}`,
+      'references/geo.md#ai-crawlers');
   }
   if (Buffer.byteLength(body, 'utf8') > 500 * 1024) add('medium', 'crawling', 'auto-fix', '/robots.txt', 'robots.txt exceeds 500 KiB — "Google enforces a robots.txt file size limit of 500 kibibytes"', 'crawling/robots-txt/robots-txt-spec');
   const sitemaps = [...body.matchAll(/^\s*Sitemap:\s*(\S+)/gim)].map((m) => m[1]);
@@ -305,6 +345,28 @@ function auditOneSitemap(url, body, headers, { isIndex }) {
     add('critical', 'sitemap', 'auto-fix', url,
       `${locs.length} ${isIndex ? 'child sitemaps' : 'URLs'} in one file (limit 50,000)`,
       isIndex ? 'sitemaps/large-sitemaps' : 'sitemaps/build-sitemap');
+  }
+  // Sitemap EXTENSIONS (image / video / news): validated only when the tags are actually present,
+  // so a plain page sitemap pays nothing. Limits and required tags are all corpus-quoted.
+  if (!isIndex && /<(image|video|news):/i.test(body)) {
+    for (const m of body.matchAll(/<url>([\s\S]*?)<\/url>/gi)) {
+      const imgs = (m[1].match(/<image:image>/gi) || []).length;
+      if (imgs > 1000) { add('high', 'sitemap', 'auto-fix', url, `a <url> entry carries ${imgs} <image:image> tags — "Each <url> tag can contain up to 1,000 <image:image> tags."`, 'sitemaps/image-sitemaps'); break; }
+    }
+    let vMissing = 0, vNoLoc = 0;
+    for (const m of body.matchAll(/<video:video>([\s\S]*?)<\/video:video>/gi)) {
+      const v = m[1];
+      if (!/<video:thumbnail_loc>/i.test(v) || !/<video:title>/i.test(v) || !/<video:description>/i.test(v)) vMissing++;
+      if (!/<video:content_loc>/i.test(v) && !/<video:player_loc>/i.test(v)) vNoLoc++;
+    }
+    if (vMissing) add('high', 'sitemap', 'auto-fix', url, `${vMissing} <video:video> entries are missing a required tag (thumbnail_loc, title, and description are required)`, 'sitemaps/video-sitemaps');
+    if (vNoLoc) add('high', 'sitemap', 'auto-fix', url, `${vNoLoc} <video:video> entries carry neither content_loc nor player_loc — "It's required to provide either a <video:content_loc> or <video:player_loc> tag."`, 'sitemaps/video-sitemaps');
+    const newsBlocks = [...body.matchAll(/<news:news>([\s\S]*?)<\/news:news>/gi)];
+    if (newsBlocks.length > 1000) add('high', 'sitemap', 'auto-fix', url, `${newsBlocks.length} <news:news> tags in one sitemap — "a sitemap may have up to 1,000 news:news tags"; split it`, 'sitemaps/news-sitemap');
+    const nMissing = newsBlocks.filter((m) => !/<news:name>/i.test(m[1]) || !/<news:language>/i.test(m[1]) || !/<news:publication_date>/i.test(m[1]) || !/<news:title>/i.test(m[1])).length;
+    if (nMissing) add('high', 'sitemap', 'auto-fix', url, `${nMissing} <news:news> entries are missing required tags (publication name, language, publication_date, title)`, 'sitemaps/news-sitemap');
+    const nStale = newsBlocks.filter((m) => { const d = m[1].match(/<news:publication_date>([^<]+)</i)?.[1]; const t = d ? Date.parse(d.trim()) : NaN; return Number.isFinite(t) && Date.now() - t > 2 * 86400 * 1000; }).length;
+    if (nStale) add('medium', 'sitemap', 'auto-fix', url, `${nStale} news entries are older than two days — "Only include recent URLs for articles that were created in the last two days."`, 'sitemaps/news-sitemap');
   }
   if (/<priority>/i.test(body)) add('low', 'sitemap', 'auto-fix', url, '<priority> present — "Google ignores <priority> and <changefreq> values"', 'sitemaps/build-sitemap');
   if (/<changefreq>/i.test(body)) add('low', 'sitemap', 'auto-fix', url, '<changefreq> present — Google ignores it', 'sitemaps/build-sitemap');
@@ -435,6 +497,57 @@ const crossHosts = new Set();      // foreign hosts already reported (one findin
 const hreflangGraph = new Map();   // identity key -> Set(identity keys it declares as alternates)
 const keyUrl = new Map();          // identity key -> the URL we actually crawled, for messages
 const sitemapAlts = new Map();     // url -> [{lang, href}] declared via <xhtml:link> in the sitemap
+const ogMissing = new Map();       // url -> which of og:title/og:description/og:image are absent (raw view)
+
+// ---- structured data: per-type required properties --------------------------------------------
+// Each entry mirrors the "Required properties" table of the corresponding corpus page. Missing a
+// required property means the block is not eligible for that rich result; that is Google's framing,
+// not ours. Types NOT listed here are simply not validated (absence of a rule is not a pass).
+const SD_REQUIRED = {
+  Event:          { req: ['name', 'startDate', 'location'], doc: 'structured-data/event' },
+  JobPosting:     { req: ['title', 'description', 'datePosted', 'hiringOrganization', 'jobLocation'], doc: 'structured-data/job-posting' },
+  Recipe:         { req: ['name', 'image'], doc: 'structured-data/recipe' },
+  VideoObject:    { req: ['name', 'thumbnailUrl', 'uploadDate'], doc: 'structured-data/video' },
+  LocalBusiness:  { req: ['name', 'address', 'image'], doc: 'structured-data/local-business' },
+  BreadcrumbList: { req: ['itemListElement'], doc: 'structured-data/breadcrumb' },
+};
+// Article types have NO required properties ("There are no required properties; instead, add the
+// properties that apply to your content." — structured-data/article). The recommended set doubles
+// as the freshness/authorship signal AI retrieval favors, so its absence is reported at `low`.
+const ARTICLE_TYPES = new Set(['Article', 'NewsArticle', 'BlogPosting']);
+const ARTICLE_RECOMMENDED = ['headline', 'image', 'datePublished', 'dateModified', 'author'];
+// The corpus has no page for these types anymore. Say UNKNOWN; never assert eligibility either way.
+const SD_GONE_FROM_CORPUS = new Set(['FAQPage', 'HowTo']);
+
+function validateSdNode(n, path, tag, view) {
+  if (!n || typeof n !== 'object') return;
+  const cls = view === 'raw' ? 'auto-fix' : 'render';
+  for (const t of [].concat(n['@type'] ?? [])) {
+    const rule = SD_REQUIRED[t];
+    if (rule) {
+      const missing = rule.req.filter((p) => n[p] == null || n[p] === '' || (Array.isArray(n[p]) && !n[p].length));
+      if (missing.length) add('high', 'structured-data', cls, path, `${tag}${t} JSON-LD is missing required propert${missing.length > 1 ? 'ies' : 'y'} ${missing.join(', ')} — the block is not eligible for the ${t} rich result`, rule.doc);
+    }
+    if (t === 'BreadcrumbList' && Array.isArray(n.itemListElement)) {
+      const badItems = n.itemListElement.filter((li) => li && (li.position == null || (li.item == null && li.name == null))).length;
+      if (badItems) add('high', 'structured-data', cls, path, `${tag}BreadcrumbList has ${badItems} ListItem(s) without position + item/name (both are required)`, 'structured-data/breadcrumb');
+    }
+    if (t === 'Product') {
+      if (n.name == null || n.name === '') add('high', 'structured-data', cls, path, `${tag}Product JSON-LD is missing required property name`, 'structured-data/product-snippet');
+      if (n.review == null && n.aggregateRating == null && n.offers == null) add('high', 'structured-data', cls, path, `${tag}Product JSON-LD has none of review / aggregateRating / offers — "You must include one of the following properties" for the product snippet`, 'structured-data/product-snippet');
+    }
+    if (ARTICLE_TYPES.has(t)) {
+      const missing = ARTICLE_RECOMMENDED.filter((p) => n[p] == null || n[p] === '');
+      // No required properties exist for Article; this is recommended-only, hence `low`. The date
+      // and author fields are also the machine-readable freshness/authorship signals that AI
+      // retrieval favors ("relevant, up-to-date web pages" — fundamentals/ai-optimization-guide).
+      if (missing.length) add('low', 'structured-data', cls, path, `${tag}${t} JSON-LD lacks recommended propert${missing.length > 1 ? 'ies' : 'y'} ${missing.join(', ')} — no property is required for Article, but dates and author are the freshness/authorship signals both rich results and AI retrieval use`, 'structured-data/article');
+    }
+    if (SD_GONE_FROM_CORPUS.has(t)) {
+      add('low', 'structured-data', 'handoff', path, `${tag}${t} JSON-LD present — UNKNOWN eligibility: the current corpus contains no documentation page for ${t}. Verify in the Rich Results Test before relying on this markup for any rich result`, 'structured-data/search-gallery');
+    }
+  }
+}
 
 function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
   const html = clean(rawHtml);          // markup scans: every script body emptied
@@ -452,6 +565,14 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
 
   const desc = metaC(html, 'name', 'description');
   out.desc = desc;
+
+  // Open Graph: what social/chat unfurlers (and link previews inside AI assistants) read. They
+  // never execute JS, so the RAW view is the one that matters; the rendered view exists only to
+  // power the "OG appears only after JS" delta. Not a Google ranking input; see references/geo.md.
+  out.og = ['og:title', 'og:description', 'og:image'].filter((k) => !metaCRaw(html, 'property', k));
+  // Visible text as a NON-RENDERING crawler sees it (scripts/styles already emptied by clean()).
+  // This is the GEO blind-spot measure: an SPA shell has a head full of tags and a body of nothing.
+  out.textLen = decodeEnts(html.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim().length;
   if (!desc) add('high', 'on-page', view === 'raw' ? 'auto-fix' : 'render', path, `${tag}missing meta description`, 'appearance/snippet');
   else if (view === 'raw') seenDesc.set(url, desc);
 
@@ -520,6 +641,7 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
       const data = JSON.parse(blk);
       const nodes = Array.isArray(data) ? data : data['@graph'] || [data];
       for (const n of nodes) {
+        validateSdNode(n, path, tag, view);
         if (n?.aggregateRating) {
           const ar = n.aggregateRating;
           const cnt = Number(ar.reviewCount ?? ar.ratingCount ?? 0);
@@ -548,6 +670,10 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     // headings to help users navigate your pages". So: no multi-h1 finding, and a MISSING heading is
     // reported as information for a human, never as a defect.
     if (!h1.length) out.noRawH1 = true;
+    // Near-empty raw text: DECIDED later, like noRawH1. With --render the delta names it precisely;
+    // raw-only it becomes a handoff, because "no text" and "text arrives via JS" look identical here.
+    if (out.textLen < 200) out.lowRawText = true;
+    if (out.og.length) ogMissing.set(url, out.og);
     const imgs = [...html.matchAll(/<img\b[^>]*>/gi)].map((m) => m[0]);
     const noAlt = imgs.filter((t) => !/(^|\s)alt(\s|=|>|\/)/i.test(t)).length;
     if (noAlt) add('low', 'on-page', 'auto-fix', path, `${noAlt}/${imgs.length} <img> without alt`, 'appearance/google-images');
@@ -573,6 +699,12 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
     if (/\bnoimageindex\b/.test(rb)) add('medium', 'indexing', 'handoff', path, 'noimageindex — images on this page cannot be indexed', 'crawling-indexing/robots-meta-tag');
     if (/\bunavailable_after\b/.test(rb)) add('low', 'indexing', 'handoff', path, 'unavailable_after set — page will drop out of the index on that date', 'crawling-indexing/robots-meta-tag');
     if (/\bnosnippet\b/.test(rb) && /\bmax-snippet\b/.test(rb)) add('low', 'indexing', 'auto-fix', path, 'both nosnippet and max-snippet present — the most restrictive wins; drop one', 'crawling-indexing/robots-meta-tag');
+    // Preview controls gate Google's AI surfaces too: "To limit the information shown from your
+    // pages in Search, use nosnippet, data-nosnippet, max-snippet, or noindex controls." A page
+    // must be snippet-ELIGIBLE to appear in generative AI features, so these are also GEO levers.
+    if (/\bnosnippet\b/.test(rb)) add('low', 'ai-search', 'handoff', path, 'nosnippet set — this also limits what AI Overviews / AI features can show from this page, since preview controls are the documented mechanism for limiting AI features. Confirm that is intended.', 'appearance/ai-features');
+    const maxSnip = rb.match(/max-snippet\s*:\s*(-?\d+)/);
+    if (maxSnip && Number(maxSnip[1]) >= 0 && Number(maxSnip[1]) < 50) add('low', 'ai-search', 'handoff', path, `max-snippet:${maxSnip[1]} — a tight snippet cap also caps what Search and AI features may quote from this page. Confirm that is intended.`, 'appearance/ai-features');
     if (/<meta[^>]*name=["']keywords["']/i.test(html)) add('low', 'on-page', 'auto-fix', path, 'meta keywords present — Google does not use it', 'crawling-indexing/special-tags');
 
     // "Google no longer uses [rel=next/prev]" for pagination.
@@ -590,6 +722,15 @@ function auditHtml(rawHtml, url, view /* 'raw' | 'rendered' */, headers) {
       try {
         const c = new URL(canonical, origin);
         if (!c.searchParams.has(pageParam)) add('high', 'canonical', 'auto-fix', path, `paginated page canonicalizes to page 1 (${canonical}) — "give each page its own canonical URL"`, 'specialty/ecommerce/pagination-and-incremental-page-loading');
+      } catch { add('medium', 'canonical', 'auto-fix', path, `canonical is not a valid URL: "${canonical}"`, 'consolidate-duplicate-urls'); }
+    }
+    // PATH-based pagination (/page/2/, WordPress and most blog engines) is the same defect in a
+    // different URL shape. Same rule, same doc: each page needs its own canonical.
+    const pathPage = u.pathname.match(/(?:^|\/)page\/(\d+)(?:\/|$)/i);
+    if (pathPage && Number(pathPage[1]) > 1 && canonical) {
+      try {
+        const c = new URL(canonical, origin);
+        if (!/(?:^|\/)page\/\d+(?:\/|$)/i.test(c.pathname)) add('high', 'canonical', 'auto-fix', path, `paginated page (/page/${pathPage[1]}/) canonicalizes to a non-paginated URL (${canonical}) — "give each page its own canonical URL"`, 'specialty/ecommerce/pagination-and-incremental-page-loading');
       } catch { add('medium', 'canonical', 'auto-fix', path, `canonical is not a valid URL: "${canonical}"`, 'consolidate-duplicate-urls'); }
     }
 
@@ -645,7 +786,7 @@ async function cdpHtml(wsUrl) {
 // ---- site-level probes --------------------------------------------------------------------------
 const PROBE = '__google-seo-audit-probe-404__';
 const GHOST = `${origin}/${PROBE}`;
-const MAX_PREFIX_PROBES = num('max-prefix-probes', 8);
+const MAX_PREFIX_PROBES = num('max-prefix-probes', UNLIMITED);
 let ghostIs200 = false, ghostFinal = '';
 
 async function siteProbes() {
@@ -653,6 +794,7 @@ async function siteProbes() {
 
   // Soft 404: a URL that cannot exist must not answer 200.
   const r = await get(GHOST);
+  await llmsTxtProbe(r.status === 200);
   ghostIs200 = r.status === 200;
   ghostFinal = r.finalUrl && norm(r.finalUrl) !== norm(GHOST) ? r.finalUrl : '';
   if (!ghostIs200) return;
@@ -673,6 +815,25 @@ async function siteProbes() {
       ? `a nonexistent URL redirects to ${ghostFinal}, which returns HTTP 200. Google defines a soft 404 by CONTENT — "a URL that returns a page telling the user that the page does not exist and also a 200 (success) status code" — so this is a soft 404 only if that destination is an error page. A login or home page is a different problem: the URL should 404.`
       : `a nonexistent URL returns HTTP 200 (soft 404). If this is a client-routed SPA, confirm the error page adds noindex via JS — "Add a <meta name="robots" content="noindex"> to error pages using JavaScript." Re-run with --render to check automatically.`),
     ghostFinal ? 'crawling-indexing/troubleshoot-crawling-errors' : 'crawling-indexing/javascript/javascript-seo-basics');
+}
+
+// llms.txt: a MISSING file is a NON-finding, on Google's own words: "You don't need to create new
+// machine readable files, AI text files, markup, or Markdown to appear in Google Search (including
+// its generative AI capabilities), as Google Search itself doesn't use them." No major answer
+// engine documents reading it either (references/geo.md). We only report on one that EXISTS,
+// because an existing-but-broken file signals a rewrite bug, and an existing-good one deserves an
+// honest expectation-setting note rather than silence.
+async function llmsTxtProbe(rootAnswers200) {
+  const r = await get(origin + '/llms.txt');
+  if (r.status !== 200 || !String(r.body || '').trim()) return;
+  const looksHtml = /^\s*</.test(r.body) || /text\/html/i.test(r.headers.get?.('content-type') || '');
+  if (looksHtml) {
+    // If the ROOT ghost also answers 200, an SPA catch-all serves EVERYTHING; the root soft-404
+    // finding already names that defect, and "llms.txt serves HTML" would be the same finding again.
+    if (!rootAnswers200) add('low', 'ai-search', 'auto-fix', '/llms.txt', 'llms.txt exists but serves HTML, not text — a rewrite is answering for it, and no consumer can parse HTML as llms.txt. Serve the real file or return 404. (Google ignores llms.txt either way.)', 'fundamentals/ai-optimization-guide');
+    return;
+  }
+  add('low', 'ai-search', 'handoff', '/llms.txt', 'llms.txt present — fine to keep for services that read such files, but expect no Google effect: "Doing so will neither harm nor help your site\'s visibility or rankings in Google Search, as Google Search ignores them."', 'fundamentals/ai-optimization-guide');
 }
 
 // Soft-404 behavior is PATH-DEPENDENT the moment a host has rewrite rules. A static host that
@@ -847,9 +1008,21 @@ for (const [label, map, sev, doc] of [['<title>', seenTitle, 'high', 'appearance
   }
 }
 
+// Unfurler metadata is usually a per-TEMPLATE property: report the site-wide shape once, not once
+// per page. Raw view is authoritative here because unfurlers never render JS; a page that injects
+// OG via JS still belongs in this count (and the render pass below names that delta separately).
+if (ogMissing.size) {
+  const total = rawViews.size || ogMissing.size;
+  const tags = [...new Set([...ogMissing.values()].flat())].join(', ');
+  const sample = [...ogMissing.keys()].slice(0, 3).map(shortPath).join(', ');
+  add('low', 'social', 'auto-fix', ogMissing.size === total && total > 1 ? origin : sample,
+    `${ogMissing.size} of ${total} audited pages lack Open Graph tags (missing: ${tags}) — e.g. ${sample}. Unfurlers in Slack/X/WhatsApp/iMessage and AI assistants' link previews read raw HTML only; without og:title/og:description/og:image a shared link renders bare. Not a Google ranking input.`,
+    'references/geo.md#unfurlers');
+}
+
 // raw-vs-rendered delta: the AI-crawler blind spot
 if (RENDER) {
-  const RENDER_CAP = num('max-render', 25);
+  const RENDER_CAP = num('max-render', UNLIMITED);
   // Only pages with a raw baseline can be diffed. Redirected/failed URLs are in `pages` but not in
   // `rawViews`; rendering them would make every delta ("exists only after JS runs") fire spuriously.
   const audited = [...rawViews.keys()];
@@ -901,15 +1074,33 @@ if (RENDER) {
       if (tagText(clean(html), 'h1').length) add('medium', 'on-page', 'auto-fix', path, '<h1> only exists after JS runs', 'javascript/javascript-seo-basics');
       else add('low', 'on-page', 'handoff', path, 'no <h1> anywhere, rendered or raw. Google mandates no h1 count; it asks you to "provide headings to help users navigate your pages".', 'fundamentals/seo-starter-guide');
     }
+    // GEO: the MAIN CONTENT delta. The head deltas above catch tags; this catches the body itself.
+    // A near-empty raw page whose rendered text is substantial is an unrendered shell: Google gets
+    // it late (render queue), AI crawlers / answer engines / unfurlers never get it at all.
+    if (raw.lowRawText) {
+      if (rv.textLen > Math.max(600, (raw.textLen || 0) * 3)) {
+        add('high', 'javascript', 'auto-fix', path, `main content exists only after JS runs (~${raw.textLen} chars of raw text vs ~${rv.textLen} rendered). Google renders eventually; AI crawlers and unfurlers never do. SSR, static rendering, or hydration puts the content in the HTML source.`, 'javascript/javascript-seo-basics');
+      } else if (rv.textLen < 200) {
+        add('low', 'on-page', 'handoff', path, `almost no text content raw OR rendered (~${rv.textLen} chars) — there is nothing here for any crawler to index; a human should decide whether this page should exist`, 'fundamentals/seo-starter-guide');
+      }
+    }
+    // OG delta: tags missing raw but present rendered. Unfurlers never render, so JS-injected OG
+    // is dead weight; only baking it into the source fixes the preview.
+    if ((raw.og?.length ?? 0) > 0 && Array.isArray(rv.og) && rv.og.length < raw.og.length) {
+      const jsOnly = raw.og.filter((k) => !rv.og.includes(k));
+      add('medium', 'social', 'auto-fix', path, `Open Graph tags (${jsOnly.join(', ')}) exist only after JS runs — unfurlers never render JS, so shared links show no preview. Bake them into the HTML source.`, 'references/geo.md#unfurlers');
+    }
   }
 }
 
 // Pages we never rendered (raw-only run, over the render cap, or Chrome unavailable) still owe an
 // h1 verdict. Without this the signal silently vanishes for them.
 for (const [u, v] of rawViews) {
-  if (!v.noRawH1 || renderedUrls.has(u)) continue;
+  if (renderedUrls.has(u)) continue;
   const p = new URL(u).pathname + new URL(u).search;
-  add('low', 'on-page', 'handoff', p, 'no <h1> in the raw HTML, and this page was not rendered. Google mandates no h1 count — it asks you to "provide headings to help users navigate your pages". If the page is client-rendered the heading may be added by JS; re-run with --render (or raise --max-render) to tell the difference.', 'fundamentals/seo-starter-guide');
+  if (v.noRawH1) add('low', 'on-page', 'handoff', p, 'no <h1> in the raw HTML, and this page was not rendered. Google mandates no h1 count — it asks you to "provide headings to help users navigate your pages". If the page is client-rendered the heading may be added by JS; re-run with --render (or raise --max-render) to tell the difference.', 'fundamentals/seo-starter-guide');
+  // Same owed-verdict rule as the h1: a page never rendered still deserves the low-text signal.
+  if (v.lowRawText) add('medium', 'javascript', 'handoff', p, `raw HTML carries almost no visible text (~${v.textLen} chars), and this page was not rendered. If it is client-rendered, the content is invisible to every non-rendering consumer (AI crawlers, answer engines, unfurlers) and delayed for Google. Re-run with --render (or raise --max-render) to measure the raw-vs-rendered content delta.`, 'javascript/javascript-seo-basics');
 }
 
 // ---- report -----------------------------------------------------------------------------------
@@ -938,3 +1129,5 @@ if (flag('json')) writeFileSync(String(flag('json')), JSON.stringify({ origin, p
 // 1 only when a CODE change can close something. Handoff findings (a human must verify a rating is
 // real, a bot is deliberately blocked) would otherwise wedge CI red forever with no fix available.
 exit(autoFix.length ? 1 : 0);
+// v1.1: GEO checks (AI crawler roles, llms.txt, Open Graph, raw-vs-rendered content delta),
+// per-type structured data validation, sitemap extensions, path pagination. See README + geo.md.

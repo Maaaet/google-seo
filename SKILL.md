@@ -8,9 +8,13 @@ description: >
   JavaScript/SPA site crawlable.
   Ships a runnable auditor (audit.mjs) that diffs raw HTML against the rendered DOM — the check
   that catches client-rendered SEO, which Google renders (eventually) but AI crawlers never do.
-  Every rule cites the Google doc that mandates it. Triggers: "SEO audit", "technical SEO",
-  "not indexed", "canonical", "sitemap", "robots.txt", "hreflang", "structured data",
-  "rich results", "Core Web Vitals", "traffic drop", "Search Console", "make my site rank".
+  Also audits GEO/AEO (AI answer-engine visibility): AI crawler access by role, llms.txt,
+  Open Graph/unfurler metadata, raw-vs-rendered content delta, and per-type structured data.
+  Every rule cites the Google doc that mandates it (GEO rules cite vendor docs, labeled as such
+  in references/geo.md). Triggers: "SEO audit", "technical SEO", "not indexed", "canonical",
+  "sitemap", "robots.txt", "hreflang", "structured data", "rich results", "Core Web Vitals",
+  "traffic drop", "Search Console", "make my site rank", "GEO", "AEO", "AI visibility",
+  "AI search", "ChatGPT/Claude/Perplexity citations", "AI Overviews", "llms.txt", "Open Graph".
 ---
 
 # google-seo
@@ -35,6 +39,32 @@ for Google. `audit.mjs --render` fetches both views and reports the delta. Start
 
 Google is explicit about the fix: dynamic rendering is "a workaround and not a recommended
 solution"; use **server-side rendering, static rendering, or hydration** instead.
+
+## GEO / AEO (AI answer-engine visibility)
+
+`references/geo.md` is the GEO sheet, and it is the only sheet with two sourcing tiers:
+**[corpus]** rules quote Google's own AI-optimization guide (`docs/search/docs/fundamentals/
+ai-optimization-guide.md` — in the corpus, quotable, verify-quotes-checked), and **[vendor]**
+rules cite OpenAI/Anthropic/Perplexity/Apple/Meta crawler docs by URL. The auditor's GEO checks:
+
+- **AI crawler access by role** (search / user-fetch / training). Blocking a search or user bot
+  removes a live answer surface (`medium`); blocking a training bot is a policy choice (`low`,
+  one aggregated finding, never a nag to unblock a bot you meant to block).
+- **Raw-vs-rendered MAIN CONTENT delta** (`--render`): the body text an SPA shell hides from
+  every non-rendering consumer, not just the head tags.
+- **Open Graph / unfurler metadata**: reported site-wide once, raw view only (unfurlers never
+  render JS). Not a Google ranking input and the finding says so.
+- **llms.txt**: absence is a NON-finding (Google: "Google Search ignores them"; no major answer
+  engine documents reading it). Only an existing-but-broken or existing-fine file is reported.
+- **Snippet controls as AI levers**: `nosnippet` / tight `max-snippet` also cap what AI
+  Overviews may show; surfaced as confirm-intent handoffs.
+- **Freshness/authorship signals**: Article JSON-LD missing dates/author is a `low` (nothing is
+  required for Article; dates and author are what AI retrieval favors).
+
+What GEO work this skill still cannot do, honestly: measure whether ChatGPT/Claude/Perplexity
+actually cite the site (needs longitudinal querying of those systems), brand-mention volume, or
+content quality. Those stay `handoff`. And per the corpus: don't write content "for AI", don't
+chunk, don't chase inauthentic mentions — Google documents all three as useless or harmful.
 
 ## Workflow
 
@@ -103,12 +133,14 @@ node audit.mjs <baseUrl> [--render] [--json out.json] [--max-pages N] [--max-ren
 
 - Reads `robots.txt` → sitemap(s) → every page. No npm dependencies.
 - `--render` drives headless Chrome over the DevTools Protocol (set `CHROME=/path` if not
-  auto-found) and diffs raw vs rendered `<head>`. Needs Node ≥ 22. Only the first `--max-render`
-  pages (default 25) are rendered; the rest are audited raw-only and the report says which.
+  auto-found) and diffs raw vs rendered `<head>` AND body text. Needs Node ≥ 22. By default EVERY
+  crawled page is rendered (seconds per page — cap with `--max-render` when time matters); capped
+  pages are audited raw-only and the report says which.
 - Exit `0` = no code-fixable findings (handoff items may still print) · `1` = auto-fix findings
   remain · `2` = usage error (missing/invalid base URL).
-- Coverage is capped by `--max-pages` (default 100) and **logs what it skipped** — a partial crawl
-  that reads as "all clear" is the worst possible output.
+- Coverage is UNCAPPED by default: every sitemap URL is crawled. `--max-pages` / `--max-sitemaps` /
+  `--max-render` cap it when a site is huge and time is not; every cap **logs what it skipped** — a
+  partial crawl that reads as "all clear" is the worst possible output.
 
 Checks it does NOT do (by design, they need a human or Google's own tools): Core Web Vitals field
 data, manual actions, whether your content is actually helpful, backlink quality, and whether a
@@ -131,6 +163,7 @@ rating you marked up is real. Those surface as `handoff`.
 | `references/appearance-features.md` | snippets, sitelinks, favicons, site names, Discover, images/video, Web Stories |
 | `references/ecommerce.md` | ecommerce URL structure, product data feeds, ecommerce structured data, pagination |
 | `references/security-and-abuse.md` | malware, hacked content, social engineering, Safe Browsing repeat offenders |
+| `references/geo.md` | GEO/AEO: AI crawlers by role, llms.txt, unfurlers, JS invisibility; two sourcing tiers |
 | `references/COVERAGE.md` | which corpus pages the sheets cover (generated mechanically) |
 | `docs/` | the full 158-page Google Search Central fork (grep it; it is the source of truth) |
 

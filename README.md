@@ -71,7 +71,8 @@ node audit.mjs https://example.com
 # add the rendered-DOM diff — this is the one that finds the real bugs
 node audit.mjs https://example.com --render --json report.json
 
-# large sites — note --render only renders the first --max-render pages (default 25)
+# by default NOTHING is capped: every sitemap URL is crawled and (with --render) rendered.
+# On a huge site that is hours — cap it when time matters:
 node audit.mjs https://example.com --render --max-pages 500 --max-render 100
 
 # tell it which noindex pages are intentional
@@ -81,11 +82,11 @@ node audit.mjs https://example.com --noindex-ok /admin,/preview
 | Flag | Meaning |
 |---|---|
 | `--render` | Drive headless Chrome (DevTools Protocol) and diff raw vs rendered `<head>`. Set `CHROME=/path/to/chrome` if not auto-found. |
-| `--max-render <n>` | How many pages to actually render (default **25**). Rendering is slow; the rest are audited raw-only and say so. |
-| `--max-sitemaps <n>` | How many child sitemaps to fetch from an index (default **50**), across the whole tree. A 2000-child news index would otherwise fetch every one. |
-| `--max-prefix-probes <n>` | How many sitemap path prefixes to probe for soft 404s (default **8**). |
+| `--max-render <n>` | Cap rendered pages (default: **unlimited** — every crawled page is rendered). Rendering costs seconds per page, so cap it on huge sites; capped pages are audited raw-only and say so. |
+| `--max-sitemaps <n>` | Cap child-sitemap fetches across the whole tree (default: **unlimited** — every child is fetched). |
+| `--max-prefix-probes <n>` | Cap sitemap path prefixes probed for soft 404s (default: **unlimited**). |
 | `--json <file>` | Write findings as JSON. |
-| `--max-pages <n>` | Cap pages crawled (default 100). The tool **logs what it skipped** — a partial crawl that reads "all clear" is the worst possible output. |
+| `--max-pages <n>` | Cap pages crawled (default: **unlimited** — the whole sitemap). When capped, the tool **logs what it skipped** — a partial crawl that reads "all clear" is the worst possible output. |
 | `--noindex-ok a,b` | Paths where `noindex` is deliberate. |
 | `--quiet` | Findings only. |
 
@@ -159,16 +160,51 @@ become an indexable empty page — and on `cloudflare.com`, that `/policies/<any
 **JavaScript (`--render`)** — the raw-vs-rendered delta for `<title>`, canonical, hreflang, JSON-LD,
 and `<h1>`.
 
+**GEO / AI answer engines** — AI crawlers in robots.txt **by role**: blocking a search/index
+crawler (OAI-SearchBot, PerplexityBot, Claude-SearchBot, Bingbot/Copilot, DuckAssistBot,
+Amazonbot) or a user-triggered fetcher (ChatGPT-User, Claude-User, Perplexity-User,
+MistralAI-User) removes a live answer surface and is reported `medium`; blocking a training
+crawler (GPTBot, ClaudeBot, CCBot, Applebot-Extended, Meta-ExternalAgent) is a policy choice,
+reported once, `low`, informationally — the tool never tells you to unblock a bot you meant to
+block. Plus: `llms.txt` (absence is a NON-finding — Google documents that Google Search ignores
+it; a present-but-broken one is a rewrite bug and is reported), `nosnippet`/`max-snippet` as AI
+Overview levers, and with `--render` the **raw-vs-rendered main-content text delta** — the body
+an SPA hides from every non-rendering consumer, which is the single biggest GEO defect a
+crawler-side tool can catch. Sourcing note: GEO findings that rest on vendor (non-Google) docs
+cite `references/geo.md`, which lists the vendor URLs and labels every rule [corpus] or [vendor].
+
+**Social / unfurlers** — `og:title` / `og:description` / `og:image` presence, aggregated
+site-wide (one finding, not one per page), raw view only, because unfurlers never render JS.
+Under `--render`, OG that exists only after hydration is reported: unfurlers will never see it.
+
+**Structured data, per type** — required-property validation mirroring the corpus tables:
+Event, JobPosting, Recipe, VideoObject, LocalBusiness, BreadcrumbList (incl. per-ListItem
+position/item checks), Product's review-or-rating-or-offers requirement; Article/NewsArticle/
+BlogPosting recommended properties (dates, author — the freshness signals AI retrieval favors)
+at `low`; FAQPage and HowTo report UNKNOWN eligibility because the corpus no longer documents
+them. Still not a Rich Results Test replacement; the finding text says when to use one.
+
+**Sitemap extensions** — image (1,000 per `<url>` limit), video (required thumbnail_loc /
+title / description, content_loc-or-player_loc), news (1,000 `news:news` limit, required
+publication tags, two-day recency rule). Checked only when the namespaces are present.
+
+**Pagination** — both `?page=N` and path-based `/page/N/` canonicalizing to page 1.
+
 ## What it deliberately does NOT check
 
 Core Web Vitals field data, manual actions, backlink quality, whether your content is actually
 helpful, and whether a rating you marked up is real. These are `handoff` findings. A tool that
 claimed to pass them would be lying to you.
 
-It also does not yet implement every check the reference sheets identify as mechanically auditable —
-per-type structured-data validation, sitemap image/video/news extension limits, path-based pagination
-(`/page/2/`), A/B-test redirect types, and paused-site status codes, among others. The sheets say
-*auditable*, not *audited*; each sheet's own `## Auditable checks` section is the honest list.
+It also does not yet implement every check the reference sheets identify as mechanically
+auditable — A/B-test redirect types and paused-site status codes, among others. (Per-type
+structured-data validation, sitemap extension limits, and path-based pagination were implemented
+in v1.1.) The sheets say *auditable*, not *audited*; each sheet's own `## Auditable checks`
+section is the honest list.
+
+For GEO specifically, it cannot measure whether ChatGPT / Claude / Perplexity / AI Overviews
+actually cite the site (that needs longitudinal querying of those systems, the AI analogue of
+rank tracking), nor brand-mention volume across the web. Those are `handoff` by nature.
 
 ## The rules, in short
 
@@ -204,7 +240,7 @@ stays true — run it before trusting a new rule sheet.
 SKILL.md                  agent entry point — workflow + hard-won rules
 audit.mjs                 the auditor (Node ≥ 22, zero deps)
 commands/*.md             optional Claude Code slash commands (copy to ~/.claude/commands/)
-references/*.md           13 distilled rule sheets, every claim quoted + sourced
+references/*.md           14 distilled rule sheets, every claim quoted + sourced (geo.md labels its two sourcing tiers)
 references/COVERAGE.md    which corpus pages the sheets cover (generated, can't drift)
 docs/                     158-page Google Search Central fork
 DOCS-INDEX.md             index of the fork

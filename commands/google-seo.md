@@ -10,5 +10,6 @@ General entry point for the **google-seo** skill. Use for any SEO task not cover
    - Auditing a live site → run the auditor (`node ~/.claude/skills/google-seo/audit.mjs <url> --render --json /tmp/seo-report.json`) and triage; same as `/google-seo-audit`.
    - Fixing SEO in a repo → the audit→fix→re-audit loop; same as `/google-seo-fix`.
    - Planning → the corpus build-order; same as `/google-seo-plan`.
+   - GEO / AEO / AI visibility (ChatGPT, Claude, Perplexity, AI Overviews, unfurlers) → run the auditor with `--render` and triage the ai-search / javascript / social / structured-data areas against `references/geo.md`; same as `/google-seo-geo`.
    - A specific question ("does X need Y?", "why isn't this indexed?", "what does this structured-data feature require?") → answer from the reference sheets, grepping `docs/` for anything the sheets don't cover.
 3. **Ground every claim.** Cite the Google doc. If the corpus doesn't say it, say so — never pass folklore off as documented policy. Partition any findings into auto-fix vs handoff and never fake a handoff.

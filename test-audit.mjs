@@ -431,7 +431,7 @@ await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), GF, 
 gptFull.close();
 const gfFindings = JSON.parse(readFileSync(OUT3, 'utf8')).findings;
 unlinkSync(OUT3);
-t('[e2e] a full GPTBot disallow raises the AI-search handoff', gfFindings.some((f) => /GPTBot is fully disallowed/.test(f.message) && f.class === 'handoff'));
+t('[e2e] a full GPTBot disallow raises the (aggregated) training-crawler handoff', gfFindings.some((f) => /training crawlers disallowed \([^)]*GPTBot/.test(f.message) && f.class === 'handoff'));
 
 // D3: a Googlebot content-path disallow (/build-guide) must NOT raise the render-resource CRITICAL.
 const contentBlock = createServer((req, res) => {
@@ -491,7 +491,7 @@ const big = createServer((req, res) => {
   if (u === '/robots.txt') { res.writeHead(200, { 'content-type': 'text/plain' }); return res.end(`User-agent: *\nAllow: /\nSitemap: ${b}/sitemap.xml\n`); }
   if (u === '/sitemap.xml') { res.writeHead(200, { 'content-type': 'application/xml' }); return res.end(`<?xml version="1.0" encoding="UTF-8"?><sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${[0, 1, 2].map((i) => `<sitemap><loc>${b}/c-${i}.xml</loc></sitemap>`).join('')}</sitemapindex>`); }
   const m = u.match(/^\/c-(\d+)\.xml$/);
-  if (m) { res.writeHead(200, { 'content-type': 'application/xml' }); let out = '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'; for (let i = 0; i < 40000; i++) out += `<url><loc>${b}/p/${m[1]}/${i}</loc></url>`; return res.end(out + '</urlset>'); }
+  if (m) { res.writeHead(200, { 'content-type': 'application/xml' }); let out = '<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'; for (let i = 0; i < Number(process.env.TEST_BIG_URLS || 40000); i++) out += `<url><loc>${b}/p/${m[1]}/${i}</loc></url>`; return res.end(out + '</urlset>'); }
   res.writeHead(200, { 'content-type': 'text/html' }); res.end(page('Big-site page', '<meta name="description" content="A page on a very large site here.">'));
 });
 await new Promise((r) => big.listen(0, '127.0.0.1', r));
@@ -502,7 +502,7 @@ const bigExit = await new Promise((resolve) => spawn('node', [path.join(HERE, 'a
 big.close();
 const bigWrote = existsSync(OUTB);
 if (bigWrote) unlinkSync(OUTB);
-t('[e2e] a 120k-URL sitemap index does not crash the audit', bigWrote && bigExit !== null);
+t(`[e2e] a ${3 * Number(process.env.TEST_BIG_URLS || 40000)}-URL sitemap index does not crash the audit${process.env.TEST_BIG_URLS ? ' (REDUCED via TEST_BIG_URLS; full size is 120k)' : ''}`, bigWrote && bigExit !== null);
 
 // A gzipped sitemap FILE (application/gzip) is a Google-supported format -> must be decompressed
 // and its pages audited, not silently skipped. And a 429 is TRANSIENT -> handoff, not a critical.
@@ -1047,6 +1047,60 @@ t('[e2e] a spec-escaped self-canonical hub is not its own victim (no false CRITI
 // the chain shares one <title>: 3 language variants + 1 unrelated page = 2 distinct pages, not 3
 const chainMsg = findings.find((f) => /Chained Shared Title/.test(f.message))?.message ?? '';
 t('[e2e] an hreflang chain counts as ONE page, so the message says 2 distinct pages', /^2 distinct pages share one <title>/.test(chainMsg));
+
+// ---------------------------------------------------------------- e2e: GEO + structured data ----
+// One fixture site exercising the v1.1 checks: AI-crawler roles, llms.txt, Open Graph aggregation,
+// low-raw-text handoff, per-type JSON-LD validation, path pagination, news sitemap extension rules.
+{
+  const geoSrv = createServer((req, res) => {
+    const B = `http://127.0.0.1:${geoSrv.address().port}`;
+    const u = req.url.split('?')[0];
+    const R = {
+      '/robots.txt': ['text/plain', `User-agent: *\nAllow: /\n\nUser-agent: OAI-SearchBot\nDisallow: /\n\nUser-agent: GPTBot\nDisallow: /\n\nUser-agent: CCBot\nDisallow: /\n\nSitemap: ${B}/sitemap.xml\n`],
+      '/llms.txt': ['text/plain', '# Example\n\n- docs: /docs\n'],
+      '/sitemap.xml': ['application/xml', `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+<url><loc>${B}/prod</loc></url>
+<url><loc>${B}/article</loc></url>
+<url><loc>${B}/faq</loc></url>
+<url><loc>${B}/page/2/</loc></url>
+<url><loc>${B}/news-stale</loc><news:news><news:publication><news:name>T</news:name><news:language>en</news:language></news:publication><news:publication_date>2020-01-01</news:publication_date><news:title>Old</news:title></news:news></url>
+<url><loc>${B}/news-bad</loc><news:news><news:title>No pub</news:title></news:news></url>
+</urlset>`],
+      '/prod': ['text/html', page('Prod page', '<meta name="description" content="A product."><meta property="og:title" content="P"><meta property="og:description" content="D"><meta property="og:image" content="/i.png"><script type="application/ld+json">{"@context":"https://schema.org","@type":"Product","name":"Widget"}</script>')],
+      '/article': ['text/html', page('Article page', '<meta name="description" content="An article."><script type="application/ld+json">{"@context":"https://schema.org","@type":"BlogPosting","headline":"H","image":"/i.png"}</script>')],
+      '/faq': ['text/html', page('FAQ page', '<meta name="description" content="Faq."><script type="application/ld+json">{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[]}</script>')],
+      '/page/2/': ['text/html', page('Blog page 2', `<meta name="description" content="Page two."><link rel="canonical" href="${B}/blog">`)],
+      '/news-stale': ['text/html', page('Old news', '<meta name="description" content="Old news.">')],
+      '/news-bad': ['text/html', page('Bad news', '<meta name="description" content="Bad news.">')],
+    };
+    if (R[u]) { res.writeHead(200, { 'content-type': R[u][0] }); return res.end(R[u][1]); }
+    res.writeHead(404, { 'content-type': 'text/html' }); res.end('<html><head><title>404</title></head><body>gone</body></html>');
+  });
+  await new Promise((r) => geoSrv.listen(0, '127.0.0.1', r));
+  const GB = `http://127.0.0.1:${geoSrv.address().port}`;
+  const OUTG = path.join(HERE, '.test-findings-geo.json');
+  if (existsSync(OUTG)) unlinkSync(OUTG);
+  await new Promise((resolve) => spawn('node', [path.join(HERE, 'audit.mjs'), GB, '--json', OUTG, '--quiet'], { stdio: ['ignore', 'ignore', 'ignore'] }).on('close', resolve));
+  geoSrv.close();
+  const gf = JSON.parse(readFileSync(OUTG, 'utf8')).findings;
+  unlinkSync(OUTG);
+  const hit = (re, cls) => gf.some((f) => re.test(f.message) && (!cls || f.class === cls));
+  t('[geo] blocking a SEARCH crawler (OAI-SearchBot) is its own medium handoff', gf.some((f) => /OAI-SearchBot is fully disallowed/.test(f.message) && f.severity === 'medium' && f.class === 'handoff'));
+  t('[geo] training blocks aggregate into ONE low finding naming both bots', gf.filter((f) => /training crawlers disallowed/.test(f.message)).length === 1 && hit(/training crawlers disallowed \([^)]*GPTBot[^)]*\)|training crawlers disallowed \([^)]*CCBot[^)]*\)/));
+  t('[geo] an existing text llms.txt raises the expectation-setting handoff', hit(/llms\.txt present/, 'handoff'));
+  t('[geo] a MISSING llms.txt on other fixtures raised no llms finding', !findings.some((f) => /llms\.txt/.test(f.message)));
+  t('[sd] Product without review/aggregateRating/offers fires the one-of HIGH', gf.some((f) => /Product JSON-LD has none of review/.test(f.message) && f.severity === 'high'));
+  t('[sd] Product WITH name does not fire the missing-name finding', !hit(/Product JSON-LD is missing required property name/));
+  t('[sd] BlogPosting missing dates/author fires the recommended LOW', gf.some((f) => /BlogPosting JSON-LD lacks recommended/.test(f.message) && /datePublished/.test(f.message) && f.severity === 'low'));
+  t('[sd] FAQPage yields UNKNOWN-eligibility handoff, not a pass or a defect', hit(/FAQPage JSON-LD present — UNKNOWN eligibility/, 'handoff'));
+  t('[geo] path-based pagination (/page/2/) canonicalizing away fires HIGH', gf.some((f) => /paginated page \(\/page\/2\/\) canonicalizes to a non-paginated URL/.test(f.message) && f.severity === 'high'));
+  t('[sitemap-ext] news entry missing required tags fires', hit(/<news:news> entries are missing required tags/));
+  t('[sitemap-ext] news entry older than two days fires', hit(/news entries are older than two days/));
+  t('[geo] pages without OG tags aggregate into one social finding', gf.filter((f) => /lack Open Graph tags/.test(f.message)).length === 1);
+  t('[geo] the OG aggregate does NOT count /prod (it has all three tags)', !gf.some((f) => /lack Open Graph tags/.test(f.message) && /\/prod/.test(f.message)));
+  t('[geo] thin raw pages get the low-text handoff (raw-only run)', gf.some((f) => /almost no visible text/.test(f.message) && f.class === 'handoff'));
+}
 
 console.log(`\nSUITE COMPLETE`);
 console.log(`${pass} passed, ${fail} failed${skipped ? `, ${skipped} skipped` : ''}`);
